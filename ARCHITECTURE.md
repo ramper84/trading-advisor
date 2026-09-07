@@ -133,10 +133,11 @@ request; `retrieval/` never touches a network source directly.
 | `config.py` | (nothing internal) | — |
 | `schemas.py` | `config` | everything else |
 | `services/run_recorder.py` | `config` | everything else — pure observability plumbing, importable by `ingest/*`, `retrieval/*`, and `routers/*` alike |
+| `services/db.py` | `config` | everything else — the one shared Postgres connection helper (registers the pgvector adapter), importable by `ingest/*`, `retrieval/*`, and `analysis/*` alike |
 | `services/market_data.py` | `config`, `schemas` | `routers`, `analysis`, `guardrails` |
 | `services/llm_service.py` | `config`, `schemas`, `prompts` | `routers` |
 | `guardrails/*` | `config`, `schemas` | `routers` |
-| `ingest/*` | `config`, `schemas`, `services/market_data.py` | `routers`, `guardrails`, `retrieval/*` |
+| `ingest/*` | `config`, `schemas`, `services/market_data.py`, `services/db.py` | `routers`, `guardrails`, `retrieval/*` |
 | `retrieval/vector_retriever.py` | `config`, `schemas`, `retrieval/hybrid_search.py`, `retrieval/temporal.py` | `ingest/*` (reads what ingest already wrote, never triggers a fetch), `routers` |
 | `retrieval/hybrid_search.py`, `retrieval/temporal.py` | `config`, `schemas` | `ingest/*`, `routers`, each other's caller role — these are called *by* `vector_retriever.py`, not by routers directly |
 | `retrieval/sql_retriever.py` | `config`, `schemas` | `ingest/*`, `routers` |

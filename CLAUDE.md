@@ -235,15 +235,25 @@ phases the prior architecture skipped:
    `edgar_parser.split_into_sections`) for `sec_edgar_filings`;
    single-chunk-per-record for `finnhub_news`/`reddit_mentions` (already
    short-form, recursive chunking adds nothing — `articles/s07-03`).
-7. **Phase 8 — Embeddings + persistence**: `text-embedding-3-small`,
-   `document_chunks` table with typed columns for
-   symbol/source_name/reliability_tier + JSONB for the rest
-   (`articles/s08-04`'s schema split), **plus `embedding_version` and
-   `source_hash` columns from day one** (`articles/s11-05`'s explicit
-   warning: "put it in from the start, even with only one version" — cheap
-   now, the alternative is silently comparing vectors from two incomparable
-   models later with no exception raised). Atomic ingest transaction per
-   source-fetch, no vector index yet.
+7. **Phase 8 — done.** `document_chunks` migration
+   (`migrations/versions/802e79b7320a_create_document_chunks.py`): typed
+   columns for symbol/source_name/reliability_tier + JSONB for the rest
+   (`articles/s08-04`'s schema split), `embedding_version` and
+   `source_hash` from day one (`articles/s11-05`'s explicit warning — cheap
+   now, a painful retrofit once a real model change happens), and the
+   `content_tsv` generated column + GIN index for Phase 10's hybrid search
+   built into the same migration rather than a second one later. No vector
+   index yet. `services/db.py` (new — a shared `get_connection()` that
+   registers the pgvector adapter once, used by every module touching
+   `document_chunks`) and `ingest/embedding.py`
+   (`text-embedding-3-small`, one batched call per source-fetch,
+   `upsert_chunks()` in one atomic transaction, idempotent on
+   `(source_name, document_id)`, skips a rewrite when `source_hash` hasn't
+   changed). 24 tests passing (5 new, all mocking the OpenAI call and the
+   DB connection — no real network calls). Verified live: migration
+   applied against a real `pgvector/pgvector:pg16` container, a chunk
+   round-tripped through insert → lexical (`tsvector`) match → vector
+   cosine distance, then cleaned up.
 8. **Phase 9 — Freshness, per source**: `refresh_worker.py` reads each
    `data_catalog.yaml` source's own `refresh.declared` cadence (1-5 min for
    quotes, hourly for filings, 30 min for news/Reddit) — one worker, one
