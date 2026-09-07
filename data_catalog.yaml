@@ -1,0 +1,183 @@
+# data_catalog.yaml — per PLAYBOOK.md's articles/s06-02. The ingest pipeline
+# (app/ingest/catalog.py) reads this at startup/refresh time: which sources
+# exist, what they're for, and whether they're currently included. Toggling
+# a source is an edit here (decision: include/exclude/review), not a code
+# change — this file IS the "multiple sources configured" the product asks
+# for.
+version: 1
+last_audited: "2026-09-06"
+
+sources:
+  - name: yfinance_quotes
+    description: >
+      Live quote + OHLCV bars per monitored symbol via the yfinance package
+      (an unofficial Yahoo Finance wrapper). Primary structured source —
+      Axis 2 (SQL-retrieval), feeds market_observations directly, no
+      embedding.
+    location: "https://query1.finance.yahoo.com (via the yfinance package)"
+    owner_technical: trading-advisor
+    owner_business: operator
+    format: json
+    axis: sql_retrieval
+    volume:
+      records: "grows with len(monitored_symbols) x refresh interval"
+      size_mb: small
+    refresh:
+      declared: "1-5 min, scheduled"
+      observed_last_update: n/a
+      observed_lag_days: 0
+    quality:
+      completeness: 5
+      consistency: 4
+      actuality: 5
+      reliability: 4
+    sensitivity:
+      contains_pii: false
+    lineage:
+      upstream: yahoo_finance_unofficial_api
+      transformations: []
+    decision: include
+    notes: >
+      No official SLA from Yahoo — the package can break on upstream
+      changes without notice. No API key required.
+
+  - name: finnhub_quotes
+    description: >
+      Secondary/fallback quote source, same shape as yfinance_quotes. Used
+      when yfinance is rate-limited or returns an error for a symbol.
+    location: "https://finnhub.io/api/v1/quote"
+    owner_technical: trading-advisor
+    owner_business: operator
+    format: json
+    axis: sql_retrieval
+    volume:
+      records: "same order as yfinance_quotes"
+      size_mb: small
+    refresh:
+      declared: "1-5 min, scheduled (same cadence as yfinance_quotes)"
+      observed_last_update: n/a
+      observed_lag_days: 0
+    quality:
+      completeness: 5
+      consistency: 4
+      actuality: 5
+      reliability: 4
+    sensitivity:
+      contains_pii: false
+    lineage:
+      upstream: finnhub_api
+      transformations: []
+    decision: include
+    notes: >
+      Requires a free Finnhub API key (FINNHUB_API_KEY). Same key also
+      backs finnhub_news below — one signup covers both.
+
+  - name: sec_edgar_filings
+    description: >
+      10-K / 10-Q / 8-K full-text filings per monitored symbol, via SEC
+      EDGAR's official full-text search API. The strongest unstructured
+      source: authoritative, public, genuinely paraphrastic filing
+      language — Axis 3 (vector RAG).
+    location: "https://efts.sec.gov/LATEST/search-index"
+    owner_technical: trading-advisor
+    owner_business: operator
+    format: html
+    axis: vector_rag
+    volume:
+      records: "event-driven; a handful of filings per symbol per year, plus 8-Ks on material events"
+      size_mb: medium (individual 10-Ks can run 50-150+ pages)
+    refresh:
+      declared: "hourly poll per monitored symbol — filings are event-driven, not scheduled from our side"
+      observed_last_update: n/a
+      observed_lag_days: 0
+    quality:
+      completeness: 5
+      consistency: 5
+      actuality: 5
+      reliability: 5
+    sensitivity:
+      contains_pii: false
+    lineage:
+      upstream: sec_edgar_full_text_search
+      transformations: [html_boilerplate_strip, section_split_by_item]
+    decision: include
+    notes: >
+      Free, official, no key — but SEC requires a descriptive User-Agent
+      header identifying the requester (EDGAR_USER_AGENT env var: "name
+      contact@email"). Chunked structurally by filing Item
+      (Item 1, Item 1A Risk Factors, Item 7 MD&A, ...), then recursively
+      within any Item still too large.
+
+  - name: finnhub_news
+    description: >
+      Company news headlines + summaries per monitored symbol via
+      Finnhub's /company-news endpoint. Short-form; one chunk per article,
+      no sub-chunking needed. Axis 3 (vector RAG).
+    location: "https://finnhub.io/api/v1/company-news"
+    owner_technical: trading-advisor
+    owner_business: operator
+    format: json
+    axis: vector_rag
+    volume:
+      records: "several per symbol per day, variable"
+      size_mb: small
+    refresh:
+      declared: "30 min, scheduled"
+      observed_last_update: n/a
+      observed_lag_days: 0
+    quality:
+      completeness: 4
+      consistency: 4
+      actuality: 5
+      reliability: 4
+    sensitivity:
+      contains_pii: false
+    lineage:
+      upstream: finnhub_api
+      transformations: []
+    decision: include
+    notes: >
+      Same FINNHUB_API_KEY as finnhub_quotes. Summaries, not full article
+      text — Finnhub's free tier does not return full bodies.
+
+  - name: reddit_mentions
+    description: >
+      Posts/comments mentioning a monitored symbol from finance-relevant
+      subreddits (r/wallstreetbets, r/stocks, r/investing), via PRAW.
+      Real signal exists but the source is anonymous, unverified, and
+      genuinely noisy — Axis 3 (vector RAG), deliberately scored lower on
+      reliability rather than treated as equal to news/filings.
+    location: "https://www.reddit.com/r/{wallstreetbets,stocks,investing} (via PRAW)"
+    owner_technical: trading-advisor
+    owner_business: operator
+    format: json
+    axis: vector_rag
+    volume:
+      records: "high and bursty — filtered at ingest by a minimum score/upvote threshold before it ever reaches chunking"
+      size_mb: small-medium
+    refresh:
+      declared: "30 min, scheduled"
+      observed_last_update: n/a
+      observed_lag_days: 0
+    quality:
+      completeness: 3
+      consistency: 2
+      actuality: 5
+      reliability: 2
+    sensitivity:
+      contains_pii: false
+    lineage:
+      upstream: reddit_api_praw
+      transformations: [min_score_filter, dedup_by_post_id]
+    decision: include
+    notes: >
+      Per articles/s06-02's own is_rag_ready rule (no dimension may drop
+      below ACCEPTABLE=3), this source does NOT clear the bar on its own —
+      reliability=2, consistency=2. Included anyway, by deliberate
+      exception, but every chunk carries reliability_tier="unverified" in
+      its metadata (see ARCHITECTURE.md §1): analysis_guard.py refuses to
+      let a BULLISH/BEARISH stance rest on Reddit chunks alone — at least
+      one reliability>=3 citation (news or filing) is required alongside
+      it. Sensitivity is "false" because Reddit usernames are already
+      pseudonymous/public social content about a ticker, not personal data
+      about an identifiable individual — revisit if that ever changes.

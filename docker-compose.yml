@@ -1,0 +1,101 @@
+services:
+  api:
+    build: .
+    container_name: trading-advisor-api
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      REDIS_URL: redis://redis:6379
+      DATABASE_URL: postgresql+psycopg://trading-advisor:trading-advisor@postgres:5432/trading-advisor
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./app:/app/app
+      - ./tests:/app/tests
+      - ./data_catalog.yaml:/app/data_catalog.yaml
+      - ./migrations:/app/migrations
+      - ./alembic.ini:/app/alembic.ini
+    command: >
+      sh -c "alembic upgrade head &&
+             uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+
+  redis:
+    image: redis:7-alpine
+    container_name: trading-advisor-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: trading-advisor-postgres
+    environment:
+      POSTGRES_USER: trading-advisor
+      POSTGRES_PASSWORD: trading-advisor
+      POSTGRES_DB: trading-advisor
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trading-advisor"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  frontend:
+    build: .
+    container_name: trading-advisor-frontend
+    env_file:
+      - .env
+    environment:
+      API_BASE_URL: http://api:8000
+    command: ["streamlit", "run", "streamlit_app.py", "--server.address=0.0.0.0", "--server.port=8501"]
+    volumes:
+      - ./streamlit_app.py:/app/streamlit_app.py
+    ports:
+      - "8501:8501"
+    depends_on:
+      - api
+    restart: unless-stopped
+
+  refresh_worker:
+    build: .
+    container_name: trading-advisor-refresh-worker
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://trading-advisor:trading-advisor@postgres:5432/trading-advisor
+      REDIS_URL: redis://redis:6379
+    volumes:
+      - ./app:/app/app
+      - ./data_catalog.yaml:/app/data_catalog.yaml
+    command: ["python", "-m", "app.ingest.refresh_worker"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  redis_data:
+  postgres_data:
