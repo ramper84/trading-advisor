@@ -16,9 +16,9 @@ no execution, no single dependency the whole system hinges on.
 |---|---|---|
 | Language | Python 3.12 | Matches `PLAYBOOK.md` §4's default |
 | HTTP | FastAPI + uvicorn | Typed request/response is the contract |
-| Store | PostgreSQL 16 (`pgvector/pgvector:pg16`) | Axis 2's `market_observations`/`economic_indicators`/`analyses`/`monitored_symbols` **and** Axis 3's `document_chunks` — pgvector is now activated |
+| Store | PostgreSQL 16 (`pgvector/pgvector:pg16`) | Axis 2's `market_observations`/`instruments`/`daily_bars`/`fundamentals`/`analyst_ratings`/`economic_indicators`/`analyses`/`monitored_symbols` (ADR-007 widens this from 4 to 8) **and** Axis 3's `document_chunks` — pgvector is now activated |
 | Cache | Redis | Freshness-budget cache for live structured-quote reads |
-| Structured data | `yfinance` (primary, covers BMV via `.MX`), `finnhub` (fallback) | Axis 2, no brokerage account, both free/free-tier |
+| Structured data | `yfinance` (primary, covers BMV via `.MX`), `finnhub` (fallback) | Axis 2, no brokerage account, both free/free-tier. `yfinance` alone also backs `instruments`/`daily_bars`/`fundamentals`/`analyst_ratings` (ADR-007) — no new dependency per data category |
 | Economic data | Banxico SIE (Mexico), FRED (US) | Axis 2, free/official, token or key registration required — ADR-006 |
 | Unstructured data | SEC EDGAR full-text search, Finnhub `/company-news`, Yahoo Finance news (`yfinance`), El Financiero + El Economista RSS (`feedparser`) | Axis 3 — see `data_catalog.yaml` for the per-source cadence/quality record. No social/community source of any kind — ADR-006 |
 | Embedding model | `text-embedding-3-small` | `PLAYBOOK.md` §4/Axis 3 default |
@@ -36,14 +36,25 @@ merely a Reddit-specific exclusion).
 
 ## 1. Architecture decision
 
-**Axis 2 (SQL-retrieval RAG)** covers `market_observations`,
-`economic_indicators` (ADR-006), and `analyses`: all three name their
-entities exactly (symbol-or-series-id, timestamp), typed columns, no
-embedding. `economic_indicators` is a separate table from
-`market_observations`, not a variant of it — `articles/s10-05`'s
-schema-divergence rule: a price tick is symbol-keyed, a Banxico/FRED series
-is economy-wide, and forcing them into one table would mean a `symbol`
-column that's `NULL` for every macro row. **Axis 3 (vector RAG) is newly
+**Axis 2 (SQL-retrieval RAG)** covers eight tables, widened by ADR-007 from
+an original three: `market_observations` (quote ticks — now carrying the
+full `fast_info` set: OHLC-today, 52-week hi/lo, SMA50/200, market cap,
+exchange/currency/quote-type, all from the *same* call already made, zero
+new API cost), `instruments` (a static reference table — sector/industry
+from the slower `Ticker.info`, refreshed once on monitor-add, not on every
+poll), `daily_bars` (adjusted-close OHLCV history — the actual chart
+backbone), `fundamentals` (valuation metrics and reported financials
+merged into one snapshot table), `analyst_ratings` (rating-change events),
+`economic_indicators` (ADR-006), and `analyses`. All name their entities
+exactly (symbol-or-series-id, timestamp), typed columns, no embedding.
+Two `articles/s10-05` schema-divergence calls are worth naming explicitly:
+`economic_indicators` is separate from `market_observations` (a price tick
+is symbol-keyed, a Banxico/FRED series is economy-wide — forcing them
+together would mean a `symbol` column that's `NULL` for every macro row),
+while `fundamentals` deliberately merges what could have been two tables
+(valuation ratios and reported financials) because both are "a company's
+financial snapshot as of a date" — not divergent enough to split. **Axis 3
+(vector RAG) is newly
 activated**, reversing the second architecture's deferral:
 `sec_edgar_filings` and the five news sources (Finnhub, Yahoo Finance, El
 Financiero, El Economista) are genuinely paraphrastic content with no
@@ -127,13 +138,18 @@ app/
 │                     llm_service.py — generation AND embedding calls
 ├── guardrails/      analysis_guard.py — output validation, divergence flag, reliability-tier citation rule
 ├── ingest/          OFFLINE: catalog.py, loaders/, parsers/ (incl. rss_parser.py,
-│                              economic_data_parser.py — ADR-006), normalizers/, chunking.py,
+│                              economic_data_parser.py — ADR-006; instrument_parser.py,
+│                              daily_bar_parser.py, fundamentals_parser.py,
+│                              analyst_ratings_parser.py — ADR-007), normalizers/, chunking.py,
 │                              embedding.py, refresh_worker.py, observation_store.py,
-│                              economic_indicator_store.py (Phase 9, ADR-006)
+│                              economic_indicator_store.py (ADR-006), instrument_store.py,
+│                              daily_bar_store.py, fundamentals_store.py,
+│                              analyst_rating_store.py (all Phase 9, ADR-007)
 ├── retrieval/       ONLINE: sql_retriever.py (Axis 2), vector_retriever.py (Axis 3, orchestrates the below)
 │                     hybrid_search.py — lexical (tsvector/GIN) branch + RRF fusion with semantic
 │                     temporal.py — per-source-family decay/recency weighting, applied last
 ├── analysis/        trending.py — deterministic, NO LLM import
+│                     technical_indicators.py — RSI + volatility from daily_bars, NO LLM import (ADR-007)
 │                     analysis_store.py — Axis 2, analyses + monitored_symbols
 ├── prompts/         analyze/v1/{system,user}.j2
 └── routers/         trending.py, symbols.py, analyze.py, monitor.py — thin HTTP only
@@ -198,9 +214,11 @@ GET /api/v1/symbols/{symbol}/analyses
  1. read analyses history for symbol, newest first                   free
 
 POST /api/v1/analyze
- 1. sql_retriever: recent market_observations + relevant                free
-    economic_indicators (country-matched: MX symbols get banxico_sie,
-    US symbols get fred_economic_data) + past analyses
+ 1. sql_retriever: recent market_observations, instrument reference row,   free
+    latest daily_bars + fundamentals snapshot, recent analyst_ratings,
+    relevant economic_indicators (country-matched: MX symbols get
+    banxico_sie, US symbols get fred_economic_data), technical_indicators
+    (RSI/volatility computed from daily_bars) + past analyses
  2. vector_retriever, in order (s10-06's cheap-first, soft-last):       free
     a. hard filter: WHERE symbol = :symbol, before any vector math
     b. semantic (pgvector) + lexical (tsvector/GIN) search, parallel
@@ -261,6 +279,8 @@ loader → parser → normalizer → (chunk → embed, for Axis-3 sources) → s
 |---|---|
 | A new structured quote vendor | `services/market_data.py` + a new `data_catalog.yaml` entry, `axis: sql_retrieval` |
 | A new economic-data source | `ingest/parsers/economic_data_parser.py` + a new `data_catalog.yaml` entry, `axis: sql_retrieval`, feeding `economic_indicators` |
+| A new market-data category (instrument/fundamentals/ratings-shaped) | A new `ingest/parsers/*_parser.py` + `*_store.py` pair feeding its own Axis-2 table — check `s10-05`'s schema-divergence rule first: does it merge into `fundamentals` (another financial-snapshot-as-of-a-date field) or genuinely need a new table? |
+| A new technical indicator | `analysis/technical_indicators.py` — compute from `daily_bars` on read, NO LLM import; persist a new column only if it turns out too expensive to compute per-request |
 | A new unstructured **news** source | If it's RSS, `ingest/parsers/rss_parser.py` already handles the shape — just a new `data_catalog.yaml` entry with the feed URL and keyword list. If it needs a real API client, a new `ingest/parsers/*_parser.py` producing `news_parser.RawArticle`. Either way, `axis: vector_rag`, no other code changes needed to activate it. **Never a social/community feed of any kind — that's not a config toggle, it's excluded by policy (ADR-006).** |
 | A prompt change | `prompts/analyze/v<N>/` — new version, not an edit |
 | A new query pattern over observation/analysis history | `retrieval/sql_retriever.py` |
@@ -289,6 +309,16 @@ loader → parser → normalizer → (chunk → embed, for Axis-3 sources) → s
 - **A vector index (`hnsw`).** Sequential scan until a measured latency
   number justifies it.
 - **A conductor**, if a second, genuinely cross-capability request appears.
+- **Per-article sentiment tagging** (ADR-007). Tagging every ingested news
+  chunk bullish/bearish/neutral at ingest time would add an LLM call per
+  article — a real cost multiplier for no proven benefit over computing
+  `stance` once, at analysis time, from the retrieved set. Reserved, not
+  built.
+- **Confirming Banxico's own series ids** (overnight rate, INPC, USD/MXN
+  fix — ADR-007). FRED's `FEDFUNDS`/`CPIAUCSL`/`DEXMXUS` are well-known and
+  already assumed; Banxico's equivalents need a real `BANXICO_SIE_TOKEN` to
+  look up and verify — a data task blocked on credentials, not on
+  architecture.
 - ~~`alpaca-core` / `alpaca-mcp`~~ — deleted (ADR-001).
 - ~~`tradingview-mcp-jarp` dependency~~ — dropped (ADR-004).
 - ~~`reddit_mentions`~~ — dropped entirely, not merely excluded-with-reason
@@ -454,3 +484,49 @@ loader → parser → normalizer → (chunk → embed, for Axis-3 sources) → s
   El Financiero, El Economista) rather than invented, per this project's
   own "verify before implementing" discipline; Finnhub/Banxico/FRED
   `fetch_*` functions remain untested pending real credentials.
+
+### ADR-007 — Widen Axis 2 to a full market-data framework (2026-09-10)
+
+- **Status**: Accepted.
+- **Context**: the operator supplied an 8-category market-data framework
+  (instrument identification, price/volume, valuation, fundamentals,
+  technical indicators, macro context, sentiment/qualitative, portfolio
+  tracking) and asked for a quick audit of what the parsers actually
+  persisted against it. The audit found `MarketObservationRecord` captured
+  only a live tick (`price`/`bid`/`ask`/`volume`) — no OHLC, no 52-week
+  range, no moving averages — despite `yfinance`'s own `fast_info` call
+  (already made for every quote) returning `open`/`dayHigh`/`dayLow`/
+  `yearHigh`/`yearLow`/`fiftyDayAverage`/`twoHundredDayAverage`/
+  `marketCap`/`exchange`/`currency`/`quoteType` for free, live-confirmed
+  the same day. Valuation, fundamentals, technical indicators (beyond what
+  `fast_info` already gives), macro-series completeness, and analyst
+  ratings were confirmed as genuine gaps — no parser touched any of them.
+  Portfolio tracking (buy price, cost basis, P&L) was confirmed as
+  correctly out of scope, not a gap, per ADR-001.
+- **Decision**: widen Axis 2 from 4 tables to 8 (§1). `market_observations`
+  gains the full `fast_info` field set at zero additional API cost. Four
+  new tables: `instruments` (reference data — sector/industry need
+  `Ticker.info`'s slower call, fetched once on monitor-add, not every
+  poll), `daily_bars` (adjusted-close OHLCV — the real chart backbone,
+  distinct grain from `market_observations`'s ticks), `fundamentals`
+  (valuation ratios and reported financials merged into one table — both
+  are "a financial snapshot as of a date," not divergent enough to split
+  per `s10-05`), `analyst_ratings` (rating-change events, via `yfinance`'s
+  `Ticker.upgrades_downgrades` — no new dependency). Technical indicators:
+  SMA50/SMA200/52-week hi-lo are already `market_observations` columns
+  (free from `fast_info`); only RSI and volatility need real computation,
+  done on read from `daily_bars` in `analysis/technical_indicators.py`
+  (deterministic, no LLM import, no persisted table — cheap enough over a
+  bounded window that persisting would be premature). `monitored_symbols`
+  gains a `thesis` text column (a one-line personal note on why a symbol
+  is watched) — an annotation, not a position, so it doesn't reopen
+  ADR-001. Per-article sentiment tagging and confirming Banxico's exact
+  series ids are named as reserved slots (§8), not built now.
+- **Consequence**: five new parsers (`instrument_parser.py`,
+  `daily_bar_parser.py`, `fundamentals_parser.py`,
+  `analyst_ratings_parser.py`, all `yfinance`-only, no new dependency) and
+  four new `*_store.py` write sides, all scoped into Phase 9 (`CLAUDE.md`
+  §7) rather than built immediately — this ADR records the scoping
+  decision, not a completed implementation. `retrieval/sql_retriever.py`
+  and the `/analyze` augmentation step (Phase 10-11) will read from all
+  eight Axis-2 tables once Phase 9 lands them.

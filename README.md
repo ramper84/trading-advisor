@@ -28,9 +28,13 @@ on a locally-run TradingView Desktop app. Both are gone, not paused — see
 
 - Retrieve and persist market data from several independently configured
   sources for every monitored symbol, on each source's own cadence
-  (`data_catalog.yaml`): structured quotes/OHLCV (`yfinance`, Finnhub),
-  official macro/economic series (Banxico, FRED), and professional news
-  (SEC filings, Finnhub, Yahoo Finance, El Financiero, El Economista).
+  (`data_catalog.yaml`): quote ticks and adjusted-close daily OHLCV bars,
+  instrument reference data (exchange, sector, industry, currency),
+  valuation and fundamentals snapshots (P/E, market cap, revenue, margins),
+  analyst rating changes, official macro/economic series (Banxico, FRED),
+  and professional news (SEC filings, Finnhub, Yahoo Finance, El
+  Financiero, El Economista) — see `ARCHITECTURE.md`'s ADR-007 for the
+  full data-category audit this was scoped from.
 - Show a **trending** view: which monitored symbols moved the most (price %
   change, volume) over the persisted history.
 - Let the user pick a monitored symbol and see its **current live status**
@@ -38,10 +42,10 @@ on a locally-run TradingView Desktop app. Both are gone, not paused — see
   budget — not just the last scheduled reading.
 - Provide an **input form to look up any company/symbol**, monitored or not,
   and run an on-demand analysis: a plain-language read of its current status
-  and trend, grounded in both the persisted price history and the
-  unstructured content (filings/news/Reddit) actually retrieved for it —
-  with per-claim source citations. Every analysis is persisted, whether or
-  not the user acts on it.
+  and trend, grounded in persisted price/fundamentals/valuation history,
+  official economic data, and professional news/filings actually retrieved
+  for it — with per-claim source citations. Every analysis is persisted,
+  whether or not the user acts on it.
 - Provide a button on a finished analysis to **add that symbol to the
   monitor list**, so it starts appearing in the trending view and dashboard
   going forward.
@@ -96,10 +100,13 @@ on a locally-run TradingView Desktop app. Both are gone, not paused — see
 ## 5. Other key points
 
 - **No brokerage account, no order execution, no position sizing or
-  portfolio risk rules.** This version manages no real or paper capital in
-  any way. `alpaca-core` and `alpaca-mcp` (sibling repos built for the
-  original scope) have been deleted — they had no purpose left once
-  execution was dropped; see `ARCHITECTURE.md`'s ADR.
+  portfolio risk rules — and no cost-basis/P&L tracking either.** This
+  version manages no real or paper capital in any way, and never will;
+  `alpaca-core` and `alpaca-mcp` (sibling repos built for the original
+  scope) have been deleted — they had no purpose left once execution was
+  dropped; see `ARCHITECTURE.md`'s ADR-001. The one personal-tracking
+  feature that *is* in scope: a one-line `thesis` note on why a symbol is
+  being watched — an annotation, not a position (ADR-007).
 - **Individual-stock lookups are in scope.** The original "diversified funds
   only" constraint existed to bound *execution* risk; with no execution
   path, it no longer applies.
@@ -135,5 +142,11 @@ on a locally-run TradingView Desktop app. Both are gone, not paused — see
 - [x] `EDGAR_USER_AGENT`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` set
 - [ ] API keys/credentials still needed: `FINNHUB_API_KEY`,
       `BANXICO_SIE_TOKEN`, `FRED_API_KEY` — external prerequisites, no code
-- [ ] Phase 9 (scheduled refresh, `market_observations` +
-      `economic_indicators` + `monitored_symbols` tables) — next up
+- [x] Data-category audit against an 8-part market-data framework
+      (2026-09-10, ADR-007) — scoped into Phase 9: OHLCV, instrument
+      reference, fundamentals/valuation, analyst ratings, technical
+      indicators (mostly free from data already fetched)
+- [ ] Phase 9 (scheduled refresh; 7 new/widened tables —
+      `market_observations`, `instruments`, `daily_bars`, `fundamentals`,
+      `analyst_ratings`, `economic_indicators`, `monitored_symbols`) —
+      next up
