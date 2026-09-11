@@ -196,5 +196,21 @@ on a locally-run TradingView Desktop app. Both are gone, not paused — see
       integration. No router or `analyses`-table persistence yet — Phase
       13's confidence gate is what computes the `quality_status` a
       persisted row needs.
-- [ ] Phase 13 (guardrails — the confidence gate: citation integrity,
-      numeric grounding, the reliability-tier rule) — next up
+- [x] Phase 13 — guardrails: `app/guardrails/analysis_guard.py` runs the
+      confidence gate (citation integrity, numeric grounding against real
+      retrieved values, the reliability-tier rule) plus an input-relevance
+      check that separates real analysis questions from execution-shaped
+      requests ("buy me 10 shares"). 162 tests passing. Verified live with
+      a real `gpt-4o-mini` call: all citations resolved cleanly, no
+      fabricated figures, `degraded` purely from thin retrieval (not
+      forced to abstain on otherwise-clean evidence). One real UX gap
+      found and fixed live: the model named raw source numbers in prose
+      that didn't match its own structured citations — harmless to the
+      guardrail (the structured field is authoritative) but misleading to
+      a reader; fixed with a prompt tightening. Phases 10-13 now form a
+      complete, independently-verified `/analyze` pipeline — no router or
+      `analyses`-table persistence yet, deferred to whenever a router is
+      actually needed (Phase 18's Streamlit UI, or sooner if asked for).
+- [ ] Phase 14-15 skipped (no agentic loop, no orchestration trigger);
+      Phase 16 (reranking) reserved — next up is Phase 17 (evals) or
+      Phase 18 (Streamlit), whichever is asked for

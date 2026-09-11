@@ -18,8 +18,14 @@ Rules you must follow:
    signal is arithmetic, not judgment — reason over it, do not recompute
    or ignore it. If `contested` is true, your rationale must explain what
    the strong sources disagree about, not paper over it with an average.
-3. Every claim in your rationale must cite the `id` of the `<source>` it
-   came from. Never cite a `chunk_id` that was not provided to you.
+3. Every claim must be backed by an entry in the structured `citations`
+   field you output, with the correct `chunk_id`. Never cite a `chunk_id`
+   that was not provided to you. The structured `citations` field is the
+   only place source ids are authoritative — do NOT write raw numeric
+   source ids inline in the `rationale` prose (e.g. "source 390" or
+   "(390, 554)"); refer to sources by what they say, not by number, since
+   a number typed in prose is not validated the way the structured field
+   is and a wrong one there would mislead a reader.
 4. If the evidence is thin, stale, or `contested` with no clear resolution
    in the data, say so plainly and prefer NEUTRAL over a confident-sounding
    guess — declining to take a strong stance on weak evidence is correct

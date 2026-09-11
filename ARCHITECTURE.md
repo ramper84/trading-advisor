@@ -173,7 +173,7 @@ request; `retrieval/` never touches a network source directly.
 | `services/db.py` | `config` | everything else — the one shared Postgres connection helper (registers the pgvector adapter), importable by `ingest/*`, `retrieval/*`, and `analysis/*` alike |
 | `services/market_data.py` | `config`, `schemas` | `routers`, `analysis`, `guardrails` |
 | `services/llm_service.py` | `config`, `schemas`, `prompts`, `analysis/synthesis.py` (the `EvidenceAggregate` it reasons over) | `routers` |
-| `guardrails/*` | `config`, `schemas` | `routers` |
+| `guardrails/*` | `config`, `schemas`, `analysis/synthesis.py` (types only), `retrieval/sql_retriever.py` (types only), `retrieval/vector_retriever.py` (types only) | `routers`, `services/llm_service.py` — no LLM import, ever; a semantic judge (reserved, §8) would be the one exception |
 | `ingest/*` | `config`, `schemas`, `services/market_data.py`, `services/db.py` | `routers`, `guardrails`, `retrieval/*` |
 | `retrieval/vector_retriever.py` | `config`, `schemas`, `retrieval/hybrid_search.py`, `retrieval/temporal.py` | `ingest/*` (reads what ingest already wrote, never triggers a fetch), `routers` |
 | `retrieval/hybrid_search.py`, `retrieval/temporal.py` | `config`, `schemas` | `ingest/*`, `routers`, each other's caller role — these are called *by* `vector_retriever.py`, not by routers directly |
@@ -745,3 +745,88 @@ loader → parser → normalizer → (chunk → embed, for Axis-3 sources) → s
   `analyses` table, no persistence built yet. Phase 13's guardrail is what
   computes `quality_status`; persisting a row without one would be a
   half-built feature, not this phase's deliverable.
+
+### ADR-011 — Guardrails built (Phase 13): the confidence gate, a domain-transfer for numeric grounding, and a prose/structure gap found live (2026-09-10)
+
+- **Status**: Accepted.
+- **Context**: `CLAUDE.md` §7 Phase 13 scoped `analysis_guard.py` —
+  `s11-03`'s referential-integrity check, `s11-04`'s numeric grounding, and
+  §2's reliability-tier rule, combined into `confidence` +
+  `quality_status`, plus an input-relevance check for execution-shaped
+  requests. This is the last phase in the core `/analyze` pipeline (Phase
+  14-15 skipped, Phase 16 reserved) — Phases 10-13 together now form a
+  complete, tested, live-verified path from a symbol + query to a
+  guarded, citation-checked stance.
+- **Decision**: `check_input_relevance` matches only imperative execution
+  shapes ("buy me 10 shares", "place an order") via a small pattern set,
+  deliberately excluding questions about buying ("should I buy AAPL",
+  "is AAPL a good buy") — those are legitimate analysis requests this
+  system must still answer, not out-of-scope ones. `check_citation_integrity`
+  is a direct, undistorted translation of `s11-03` — this check is
+  domain-agnostic (a `chunk_id` either was or wasn't in the retrieved
+  set), so no adaptation was needed, unlike Phase 12's synthesis anchor.
+- **Numeric grounding's domain transfer**: `s11-04`'s reference checks a
+  *synthesized* `[low_hours, high_hours]` range against cited sources'
+  numeric field, allowing interpolation and flagging extrapolation. This
+  project's `AnalysisSynthesis` schema has no structured numeric field at
+  all — figures live embedded in free-text `rationale`. `numeric_grounding`
+  adapts by extracting `$`/`%`-marked figures from the rationale via
+  regex and checking each against a pool of the REAL retrieved SQL values
+  (the same ones rendered into Phase 11's `<market_data>` block) — grounded
+  iff it matches a real value directly, since nothing is synthesized into
+  a range here for interpolation to apply to. Scoped deliberately to `$`
+  and `%`-marked figures only, to avoid false positives on bare numbers
+  that aren't financial claims (an Item number, "RSI-14"). Percent figures
+  are checked against both a field's raw value and its ×100 reading,
+  since this project's own ingested data (yfinance, Phase 9) stores some
+  ratios as 0-1 fractions and others already percent-scale — a named
+  imprecision, not a claim of unit certainty.
+- **`retrieval.low_confidence` folded in as a degrading input, not a
+  fourth named check**: Phase 10's own soft-fail signal already
+  represents exactly the "thin evidence" `s11-04`'s abstention discipline
+  warns should lower confidence — re-declaring it as a separate check
+  would double-encode the same concept. It contributes to `degraded`
+  severity, deliberately never to `insufficient` on its own: forcing
+  `NEUTRAL` on thin-but-otherwise-clean evidence (real citations resolve,
+  no fabricated figures, reliability rule passes) would be exactly the
+  over-abstention `s11-04` names as "declining to do the work," not
+  prudence. `insufficient`/forced-`NEUTRAL` is reserved for the three
+  conditions `CLAUDE.md` actually names: a fully-dangling citation list, a
+  fabricated `$`/`%` figure, or a failed reliability rule.
+- **`confidence` reuses Phase 12's own signal**: the mean per-citation
+  `weight` (`analysis/synthesis.py`'s `combined_weight`, already computing
+  fusion-rank/temporal/reliability) over *resolved* citations only — not a
+  new number invented at this layer. This keeps the pipeline's notion of
+  "how much does this evidence deserve to be trusted" coherent end to end
+  rather than each phase inventing its own confidence formula.
+- **Verification (2026-09-10)**: 25 new tests (input relevance including
+  the buy-question/buy-command distinction, citation integrity, numeric
+  grounding across dollar/percent/economic-indicator pools and the
+  no-pool fabrication case, the reliability rule, and full `guard_analysis`
+  integration across grounded/degraded/insufficient outcomes); 162
+  passing total. Live, same temporary-dev-Postgres discipline as
+  ADR-008/009/010 (`fantasy-postgres-1` confirmed healthy throughout and
+  after teardown): the full Phase 10-13 pipeline run against real `AAPL`
+  data with a real `gpt-4o-mini` call, then guarded — all 3 real citations
+  resolved, no fabricated figures, reliability rule passed, landing on
+  `degraded` purely from `low_confidence` being true that run, exactly the
+  intended behavior, not a failure.
+- **A real, live-only finding, fixed on the spot**: the model's free-text
+  `rationale` named raw numeric source ids ("sources 370 and 554")
+  matching neither its own structured `citations` field nor any real
+  retrieved chunk. `guard_analysis` correctly saw nothing wrong — by
+  `s11-03`'s own stated design, the structured `citations` field is the
+  source of truth and prose is presentation over it — but a reader
+  skimming only the rationale would be misled by a number that looks like
+  a citation and isn't one. Fixed by tightening `system.j2`'s citation
+  rule to explicitly forbid inline numeric source ids in prose;
+  re-verified live immediately after on the same query — no raw source
+  number appeared in the rationale.
+- **Scoping**: still no router, still no `analyses` table or persistence.
+  Phases 10-13 now form a complete, independently-tested, independently
+  live-verified pipeline (`sql_retriever`/`vector_retriever` →
+  `augmentation` → `synthesis` → `llm_service` → `analysis_guard`) with
+  no code yet calling all five in sequence outside a verification script
+  — wiring that into `POST /analyze` plus `analyses`-table persistence is
+  left for whenever a router is actually needed (Phase 18's Streamlit UI,
+  or sooner if asked for explicitly), not assumed to be this phase's job.

@@ -683,6 +683,60 @@ phases the prior architecture skipped:
     not built now. Also: an input relevance check so execution-shaped
     requests ("buy me X shares") get an explicit out-of-scope response
     rather than being reinterpreted as analysis.
+
+    **Done (2026-09-10).** `app/guardrails/analysis_guard.py`:
+    `check_input_relevance` matches imperative execution shapes only
+    ("buy me 10 shares", "place an order") — never a question about
+    buying ("should I buy AAPL"), which is a legitimate analysis request.
+    `check_citation_integrity` is a direct translation of `s11-03`'s
+    referential-integrity check — resolved vs. dangling `chunk_id`s
+    against the actual retrieved set. `numeric_grounding` is `s11-04`'s
+    check adapted: this domain synthesizes no `[low, high]` numeric range
+    (unlike the reference's budget hours), so a figure is grounded iff it
+    matches a real retrieved value directly, not "falls within an
+    interpolated range" — checked only for `$`/`%`-marked figures, a
+    deliberate scope limit avoiding false positives on bare numbers that
+    aren't financial claims (an Item number, an RSI period). Percent
+    figures are checked against both a field's raw value and its ×100
+    reading, since yfinance stores some ratios as 0-1 fractions and others
+    already percent-scale, and the rationale may phrase either way — a
+    named imprecision, not a claim of unit certainty. `check_reliability_rule`
+    matches §2's ADR literally. `guard_analysis` combines all three into
+    one code-derived `confidence` (the mean Phase-12 citation weight over
+    *resolved* citations — reusing the same signal that already decided
+    ranking, not a new number invented here) and `quality_status`.
+    `retrieval.low_confidence` (Phase 10's own soft-fail signal) is folded
+    into the severity decision as a *degrading*, not automatically
+    *insufficient*, input — forcing NEUTRAL on thin-but-otherwise-clean
+    evidence would be exactly the over-abstention `s11-04` warns against.
+    A fully-dangling citation list, any fabricated `$`/`%` figure, or a
+    failed reliability rule are the three conditions that do force
+    `insufficient`/`NEUTRAL`, matching `s11-03`'s "the one thing that's
+    never acceptable is ignoring it." 25 new tests; 162 passing total.
+
+    **Live verification (2026-09-10)**, same temporary-dev-Postgres
+    discipline as Phases 9-12 (`fantasy-postgres-1` confirmed healthy
+    throughout and after teardown): the full Phase 10-13 pipeline run
+    against real `AAPL` data with a real `gpt-4o-mini` call, then guarded.
+    `check_input_relevance` correctly separated a real analysis query from
+    "Buy me 10 shares of AAPL." with the right out-of-scope reason. The
+    guardrail resolved all 3 real citations (no dangling, no fabricated
+    figures), `reliability_rule_passed=True`, landing on `degraded` purely
+    because retrieval's own `low_confidence` was true that run — exactly
+    the intended "thin evidence lowers confidence without forcing
+    abstention" behavior, not a failure.
+
+    One real, live-only finding, fixed on the spot: the model's free-text
+    `rationale` named raw numeric source ids ("sources 370 and 554") that
+    matched neither its own structured `citations` field nor any real
+    retrieved chunk. `guard_analysis` never saw this — by `s11-03`'s own
+    design, the structured `citations` field is the source of truth and
+    prose is presentation over it, so nothing was actually ungrounded —
+    but a reader skimming the rationale alone would be misled by a number
+    that looks like a citation and isn't one. Fixed by tightening
+    `system.j2`'s citation rule to explicitly forbid inline numeric source
+    ids in prose; re-verified live immediately after — the same query's
+    rationale no longer named any raw source number.
 13. **Phase 14-15 — skipped**: no agentic Actor-Critic loop (Phase 13's
     guardrail is deterministic code, not an iterating model), no
     orchestration trigger.
