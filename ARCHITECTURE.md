@@ -150,6 +150,8 @@ app/
 │                     temporal.py — per-source-family decay/recency weighting, applied last
 ├── analysis/        trending.py — deterministic, NO LLM import
 │                     technical_indicators.py — RSI + volatility from daily_bars, NO LLM import (ADR-007)
+│                     augmentation.py — assembles SQL + vector retrieval into one XML context,
+│                              pure function, NO LLM import, NO DB access (Phase 11, ADR-009)
 │                     analysis_store.py — Axis 2, analyses + monitored_symbols
 ├── prompts/         analyze/v1/{system,user}.j2
 └── routers/         trending.py, symbols.py, analyze.py, monitor.py — thin HTTP only
@@ -175,6 +177,7 @@ request; `retrieval/` never touches a network source directly.
 | `retrieval/hybrid_search.py`, `retrieval/temporal.py` | `config`, `schemas` | `ingest/*`, `routers`, each other's caller role — these are called *by* `vector_retriever.py`, not by routers directly |
 | `retrieval/sql_retriever.py` | `config`, `schemas` | `ingest/*`, `routers` |
 | `analysis/trending.py` | `config`, `schemas` | `services/llm_service.py` — **no LLM import, ever** |
+| `analysis/augmentation.py` | `config`, `schemas`, `analysis/technical_indicators.py`, `retrieval/sql_retriever.py` (types only), `retrieval/vector_retriever.py` (types only) | `services/llm_service.py` — no LLM import; `services/db.py` — pure function, caller fetches rows |
 | `analysis/analysis_store.py` | `config`, `schemas` | `routers` |
 | `prompts/*` | `schemas` | everything else |
 | `routers/*` | anything above | — (holds no business logic) |
@@ -601,4 +604,65 @@ loader → parser → normalizer → (chunk → embed, for Axis-3 sources) → s
   configuration to remember it. **The operator was advised to rotate the
   exposed `FRED_API_KEY`** as a precaution, independent of the code fix —
   a credential seen in a session transcript is treated as compromised
-  regardless of whether the transcript itself leaks further.
+  regardless of whether the transcript itself leaks further. The key has
+  since been rotated (confirmed by the operator, 2026-09-10).
+
+### ADR-009 — Augmentation built (Phase 11); a deliberate `fit_to_budget` deviation from the reference (2026-09-10)
+
+- **Status**: Accepted.
+- **Context**: `CLAUDE.md` §7 Phase 11 scoped `POST /analyze` assembling
+  both retrieval types into one XML-delimited context, per
+  `articles/s09-04` (XML `<source>` delimiters, `reorder_u_pattern`
+  edge-loading) and `s11-01` (extractive compression, a composable
+  compress→order→fit pipeline). Neither generation (Phase 12) nor the
+  confidence gate (Phase 13) exist yet.
+- **Decision**: build `app/analysis/augmentation.py` as a pure function —
+  no DB or network access of its own, matching `retrieval/*`'s own
+  read-only style one layer up. No router built: a `POST /analyze` that
+  only returns assembled context, with no analysis behind it, would be a
+  half-built endpoint, not this phase's actual deliverable — the router
+  is deferred until Phase 12-13 give it something coherent to do. The
+  Axis-2 side renders as one deterministic `<market_data>` XML block,
+  never compressed or budget-trimmed (it's already typed and terse); the
+  Axis-3 side gets `s11-01`'s full pipeline — extractive compression
+  (filing-family only), `s09-04`'s corrected `reorder_u_pattern` (not
+  `s11-01`'s own broken `insert(0, item)` version — CLAUDE.md's Phase 11
+  entry names the bug explicitly, this ADR just confirms it wasn't
+  reproduced), then a token-budget fit.
+- **A real divergence from the reference, chosen deliberately**: `s09-04`'s
+  `truncate_to_token_budget` `break`s on the first chunk that doesn't fit
+  — correct only when the input is still sorted by descending relevance.
+  `s11-01`'s own `fit_to_budget` runs *after* the edge-loading `order`
+  stage, over input that is no longer monotonic by position, and uses a
+  **continue**-on-miss loop instead — skip the chunk that doesn't fit,
+  keep checking the rest. `augmentation.py`'s `fit_to_budget` follows
+  `s11-01`'s version for exactly this reason: with edge-loading applied
+  first (per this project's own pipeline order), a `break`-based fit would
+  wrongly discard a small, still-fitting chunk that happens to sit
+  immediately after a large one. Live-verified with a deliberately tight
+  800-token budget against a real 8-chunk retrieved set: 6 dropped, 2
+  kept, `augmentation_dropped_chunks` logged — the continue-loop's
+  behavior confirmed on real data, not asserted from the synthetic unit
+  test alone.
+- **`ANALYSIS_CONTEXT_TOKEN_BUDGET` default (12,000, `config.py`)**: not
+  `s09-04`'s theoretical 15%-output/5%-overhead ceiling (~102k tokens on
+  gpt-4o-mini's 128k window) — this project's actual retrieval breadth
+  (`VECTOR_TOP_K=8` per branch, at most ~16 distinct fused chunks) never
+  approaches that, so a conservative, explicit default was chosen over
+  the theoretical maximum. Configurable, per `s10-01`'s "measurable
+  experiment" discipline, not hardcoded.
+- **Verification (2026-09-10)**: 13 new tests (compression, both
+  `reorder_u_pattern` cases including the 6-item shape, the
+  continue-vs-break `fit_to_budget` distinction, market-data XML
+  rendering with fields present and absent, full integration); 119
+  passing total. Live, on the same temporary-dev-Postgres discipline as
+  ADR-008 (`fantasy-postgres-1` confirmed healthy throughout and after
+  teardown): a real context assembled for `AAPL` from real `sql_retriever`
+  rows and a real `vector_retriever.retrieve()` result — 4,542 tokens,
+  nothing dropped at the default budget; re-run at an 800-token budget,
+  6 of 8 real chunks correctly dropped and logged. No new bugs found —
+  the one notable observation was expected behavior, not a defect:
+  `<technical_indicators>` correctly omitted `rsi_14` (needs ≥15 daily
+  bars; `refresh_daily_bars` only pulls a 5-day window) while still
+  reporting `volatility`/`window_days`, exactly `technical_indicators.py`'s
+  intended "insufficient data stays absent, never invented" behavior.

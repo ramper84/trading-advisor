@@ -40,6 +40,13 @@ class Settings(BaseSettings):
     # Quality gate (s11-03/s11-04)
     semantic_judge_enabled: bool = False
 
+    # Augmentation (Phase 11, articles/s09-04's 15% output + 5% overhead
+    # heuristic on gpt-4o-mini's 128k window would allow ~102k; this
+    # project's actual retrieval breadth (vector_top_k=8 per branch) never
+    # approaches that, so a conservative, explicit default is used instead
+    # of the theoretical ceiling)
+    analysis_context_token_budget: int = 12_000
+
 
 @lru_cache
 def get_settings() -> Settings:

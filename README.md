@@ -167,10 +167,20 @@ on a locally-run TradingView Desktop app. Both are gone, not paused — see
       unbounded SEC EDGAR refetch, a naive/aware `datetime` comparison, a
       missing `::vector` cast, and an `httpx`-logging gap that would have
       leaked `FRED_API_KEY` into container logs on every scheduled poll
-      (see `ARCHITECTURE.md`'s ADR-008). **A real `FRED_API_KEY` was seen
-      in plaintext in a verification log line before the logging fix
-      landed — rotate this key at
-      https://fredaccount.stlouisfed.org/apikey if that hasn't been done
-      yet.**
-- [ ] Phase 11 (augmentation: `POST /analyze` assembles SQL + vector
-      retrieval into one structured context) — next up
+      (see `ARCHITECTURE.md`'s ADR-008). The exposed `FRED_API_KEY` has
+      been rotated.
+- [x] Phase 11 — augmentation: `app/analysis/augmentation.py` assembles
+      SQL + vector retrieval into one XML-delimited context — a
+      deterministic `<market_data>` block (instrument, latest quote,
+      fundamentals, technical indicators, analyst ratings, economic
+      indicators) plus edge-loaded, budget-fit `<source>` blocks from the
+      retrieved filing/news chunks. 119 tests passing. Verified live
+      against real `AAPL` data: a full context assembled with nothing
+      dropped at the default budget, then re-run at a deliberately tight
+      budget to confirm the drop-and-log behavior fires on real retrieved
+      chunks, not just a synthetic fixture. No router yet — `POST
+      /analyze` isn't a coherent endpoint until Phase 12 (generation) and
+      Phase 13 (the confidence gate) exist behind it.
+- [ ] Phase 12 (generation: two-stage synthesis — a deterministic
+      precomputed signal, then one Instructor-validated generation call)
+      — next up

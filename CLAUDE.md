@@ -529,6 +529,50 @@ phases the prior architecture skipped:
     item)` version is a documented bug that inverts the intent, don't
     reproduce it), and logging every chunk a token-budget cutoff drops,
     not silently truncating.
+
+    **Done (2026-09-10).** `app/analysis/augmentation.py`: a pure function
+    (`assemble_context`), no DB/network access of its own — the caller
+    passes already-fetched `sql_retriever` rows and a `RetrievalResult`.
+    `build_market_data_block` renders the deterministic Axis-2 side as one
+    `<market_data>` XML block (never compressed or budget-trimmed — it's
+    already terse). The Axis-3 side follows `s11-01`'s exact pipeline
+    order — `compress_chunks` (filing-family only) → `reorder_u_pattern`
+    (edge-load, unconditional, matching `s11-01`'s revision of `s09-04`'s
+    off-by-default gate) → `fit_to_budget`. `fit_to_budget` deliberately
+    uses `s11-01`'s **continue**-on-miss loop, not `s09-04`'s original
+    **break**-on-first-miss one: after edge-loading, relevance is no
+    longer monotonic by position, so a `break` would wrongly drop a small,
+    still-fitting chunk that happens to sit right after a huge one.
+    `ANALYSIS_CONTEXT_TOKEN_BUDGET` (`config.py`, default 12,000) is a
+    deliberately conservative default, not `s09-04`'s theoretical
+    15%-output/5%-overhead ceiling (~102k on a 128k window) — this
+    project's actual retrieval breadth (`VECTOR_TOP_K=8` per branch) never
+    approaches that. **No router built yet**: `POST /analyze` isn't a
+    coherent endpoint until Phase 12 (generation) and Phase 13 (the
+    confidence gate) exist behind it — returning bare assembled context
+    would be a half-built feature, not this phase's deliverable. 13 new
+    tests (compression, `reorder_u_pattern`'s exact shape incl. the 6-item
+    case, the continue-vs-break `fit_to_budget` distinction, market-data
+    XML rendering with fields present/absent, full `assemble_context`
+    integration); 119 passing total.
+
+    **Live verification (2026-09-10)**, same temporary-dev-Postgres
+    discipline as Phases 9-10 (`fantasy-postgres-1` confirmed healthy
+    throughout and after teardown): real `sql_retriever` rows +
+    `vector_retriever.retrieve()` output for `AAPL` assembled into one
+    real context block — instrument, latest quote, fundamentals, 5 real
+    analyst ratings, FRED indicators, and real SEC-filing/news `<source>`
+    blocks, 4,542 tokens total, nothing dropped at the default 12,000
+    budget. Re-run with a deliberately tight 800-token budget against the
+    same real retrieved set: 6 of 8 real chunks correctly dropped, 2 kept,
+    `augmentation_dropped_chunks` logged rather than silently truncating —
+    confirming the budget cutoff actually discriminates on real data, not
+    just a synthetic unit-test fixture. No new bugs found this pass — the
+    only surprise was expected, not a defect: `<technical_indicators>`
+    correctly omitted `rsi_14` (needs ≥15 daily bars; `refresh_daily_bars`
+    only pulls a 5-day window) while still reporting `volatility` and
+    `window_days`, exactly the "insufficient data stays absent, never
+    invented" behavior `technical_indicators.py` was built to have.
 11. **Phase 12 — Generation**: `s11-02`'s two-stage synthesis, not one
     black-box call — a deterministic aggregate computed in code first
     (a weighted signal per citation from **reliability_tier, temporal
