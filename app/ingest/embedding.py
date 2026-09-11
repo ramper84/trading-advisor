@@ -12,6 +12,7 @@ from dataclasses import dataclass
 
 import openai
 import psycopg
+import tiktoken
 from psycopg.types.json import Json
 
 from app.config import get_settings
@@ -21,6 +22,43 @@ from app.services.db import get_connection
 EMBEDDING_MODEL = "text-embedding-3-small"
 EMBEDDING_DIMENSIONS = 1536
 PREPROCESSING_ID = "v1"  # bump when the chunking/cleaning strategy changes
+
+# OpenAI's real limits are 8191 tokens per input and 300,000 per request —
+# both leave headroom below the hard limit. Live-confirmed 2026-09-10: a
+# real 10-K's "structural by Item" sections (edgar_parser.split_into_sections)
+# still add up past 300k tokens in aggregate, and Item 7 (MD&A) alone can
+# exceed 8191 on its own — this project's own "structural chunking" was
+# never followed by the recursive within-Item sub-split PLAYBOOK.md's Phase
+# 7 named as a follow-up if a section was "still too large." Truncating and
+# batching here is the stopgap that keeps ingestion from crashing; real
+# recursive sub-chunking is that still-open follow-up, not done here.
+MAX_TOKENS_PER_INPUT = 8000
+MAX_TOKENS_PER_BATCH = 250_000
+_ENCODING = tiktoken.get_encoding("cl100k_base")  # text-embedding-3-small's tokenizer
+
+
+def _truncate_to_token_limit(text: str, max_tokens: int = MAX_TOKENS_PER_INPUT) -> str:
+    tokens = _ENCODING.encode(text)
+    if len(tokens) <= max_tokens:
+        return text
+    return _ENCODING.decode(tokens[:max_tokens])
+
+
+def _batch_by_token_budget(texts: list[str], max_tokens_per_batch: int = MAX_TOKENS_PER_BATCH) -> list[list[str]]:
+    batches: list[list[str]] = []
+    current: list[str] = []
+    current_tokens = 0
+    for text in texts:
+        token_count = len(_ENCODING.encode(text))
+        if current and current_tokens + token_count > max_tokens_per_batch:
+            batches.append(current)
+            current = []
+            current_tokens = 0
+        current.append(text)
+        current_tokens += token_count
+    if current:
+        batches.append(current)
+    return batches
 
 
 @dataclass(frozen=True)
@@ -46,12 +84,19 @@ def content_hash(text: str) -> str:
 
 
 def embed_texts(texts: list[str], api_key: str | None = None) -> list[list[float]]:
-    """One batched call to the embedding model — never one call per chunk."""
+    """Batched calls to the embedding model, never one call per chunk — but
+    batched respecting OpenAI's own per-input and per-request token limits,
+    since a single ingest run (e.g. one filing's worth of Document sections)
+    can exceed both."""
     if not texts:
         return []
     client = openai.OpenAI(api_key=api_key or get_settings().openai_api_key)
-    response = client.embeddings.create(model=EMBEDDING_MODEL, input=texts)
-    return [item.embedding for item in response.data]
+    truncated = [_truncate_to_token_limit(text) for text in texts]
+    embeddings: list[list[float]] = []
+    for batch in _batch_by_token_budget(truncated):
+        response = client.embeddings.create(model=EMBEDDING_MODEL, input=batch)
+        embeddings.extend(item.embedding for item in response.data)
+    return embeddings
 
 
 @dataclass

@@ -17,6 +17,7 @@ dependencies = [
     "litellm>=1.52",
     "instructor>=1.6",
     "openai>=1.54",
+    "tiktoken>=0.7",
     "anthropic>=0.39",
     "jinja2>=3.1",
     "yfinance>=0.2.44",

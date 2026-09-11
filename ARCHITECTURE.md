@@ -530,3 +530,17 @@ loader → parser → normalizer → (chunk → embed, for Axis-3 sources) → s
   decision, not a completed implementation. `retrieval/sql_retriever.py`
   and the `/analyze` augmentation step (Phase 10-11) will read from all
   eight Axis-2 tables once Phase 9 lands them.
+- **Verification (2026-09-10, Phase 9 built and closed)**: implemented in
+  full and verified live against a real `pgvector/pgvector:pg16` instance
+  with AAPL seeded as a monitored symbol. Four real bugs surfaced and were
+  fixed in the process, each recorded in `CLAUDE.md` §7's Phase 9 entry:
+  an `.env` inline-comment parsing trap (`python-dotenv` has no delimiter
+  between a blank value and a trailing `#` comment), `embed_texts()`
+  crashing on a real 10-K's aggregate token count, `yfinance`'s
+  `FastInfo.get()` silently returning `None` for several real keys that
+  bracket access returns correctly, and `refresh_quotes` never actually
+  polling Finnhub because it routed through the yfinance-first fallback
+  helper meant for Phase 10's live-read path. Live run produced 1018 real
+  `document_chunks` from 25 actual SEC filings, 977 real analyst ratings,
+  and a fully populated `market_observations` row — no invented numbers in
+  this record.

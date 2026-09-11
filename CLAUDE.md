@@ -355,29 +355,60 @@ phases the prior architecture skipped:
    applied against a real `pgvector/pgvector:pg16` container, a chunk
    round-tripped through insert → lexical (`tsvector`) match → vector
    cosine distance, then cleaned up.
-8. **Phase 9 — Freshness, per source, and the widened Axis-2 breadth
-   (ADR-007) — next up.** Seven migrations needed (`market_observations`
-   widened with the full `fast_info` field set, `instruments`,
-   `daily_bars`, `fundamentals`, `analyst_ratings`, `economic_indicators`,
-   `monitored_symbols` with its `thesis` column — `document_chunks`
-   already exists from Phase 8) plus five new parsers
-   (`instrument_parser.py`, `daily_bar_parser.py`, `fundamentals_parser.py`,
-   `analyst_ratings_parser.py`, all `yfinance`-only) and their matching
-   `*_store.py` write sides. `refresh_worker.py` reads each
-   `data_catalog.yaml` source's own `refresh.declared` cadence (1-5 min for
-   quotes, daily for economic data/daily bars/fundamentals/ratings, hourly
-   for filings, 30 min for the five news sources) — one worker, one
-   catalog-driven schedule, dispatching to the right parser per
-   `source.name`. `instruments` is populated once per symbol on
-   monitor-add (`instrument_parser.py`'s `Ticker.info` call), not on the
-   5-minute quote cadence — a reference table doesn't need the same
-   freshness budget as a price tick. Incremental reindexing uses
-   `source_hash` to skip unchanged documents (`s11-05`'s `is_stale`
-   pattern) — a filing correction re-embeds only that filing, never the
-   whole corpus. The live-read path (`FRESHNESS_BUDGET_SECONDS`) stays
-   structured-sources-only. Banxico/FRED series ids for USD/MXN and GDP
-   still need confirming once `BANXICO_SIE_TOKEN` exists — a data task,
-   not a code blocker.
+8. **Phase 9 — done.** Seven migrations (`market_observations` with the
+   full `fast_info` field set, `instruments`, `daily_bars`, `fundamentals`,
+   `analyst_ratings`, `economic_indicators`, `monitored_symbols` with its
+   `thesis` column), plus `yfinance_daily_bars`/`yfinance_fundamentals`/
+   `yfinance_analyst_ratings` added to `data_catalog.yaml` as their own
+   sources (each with its own daily cadence, distinct from quotes' 1-5 min
+   — cadence belongs in the catalog, not hardcoded in the worker). Five new
+   parsers (`instrument_parser.py`, `daily_bar_parser.py`,
+   `fundamentals_parser.py`, `analyst_ratings_parser.py`, all
+   `yfinance`-only) and their `*_store.py` write sides. `refresh_worker.py`
+   dispatches per `source.name` to the right parser, treating
+   `banxico_sie`/`fred_economic_data` as economy-wide (one fetch, not one
+   per symbol) and `instruments` as populate-once-on-monitor-add rather
+   than catalog-cadenced. 74 tests passing.
+
+   **Verified live** against a real `pgvector/pgvector:pg16` instance with
+   AAPL seeded as a monitored symbol, and four real bugs were caught and
+   fixed in the process — this is exactly what live verification is for:
+   - `.env`'s blank values with an unquoted trailing `# comment` were
+     parsed as the comment text itself by `python-dotenv` (no delimiter
+     between an empty value and `#`) — `FRED_API_KEY` silently became the
+     literal string `"# free key: https://..."`. Fixed by moving every
+     such comment to its own line above the variable, in both `.env` and
+     `.env.example`.
+   - `embed_texts()` crashed on a real 10-K: `sec_edgar_filings`' own
+     structural-by-Item sections summed past OpenAI's 300k-tokens-per-
+     request limit, and a single large Item can exceed the 8191-token
+     per-input limit on its own. `embedding.py` now truncates any
+     oversize input and batches by a token budget — real recursive
+     sub-chunking of an oversized Item remains Phase 7's own named,
+     still-open follow-up, not fully closed by this stopgap.
+   - `yfinance`'s `FastInfo.get()` silently returns `None` for several real
+     keys (`day_high`, `year_high`, `market_cap`, `quote_type` reproduced)
+     that bracket access (`fast["day_high"]`) returns correctly — a library
+     quirk, not a missing-field case. `market_data.py` now has
+     `_fast_info_float`/`_fast_info_str` helpers that never call `.get()`;
+     a fake `FastInfo` reproducing the exact quirk guards against
+     regression in `test_market_data.py`.
+   - `refresh_quotes` always called the generic `get_quote()` (yfinance
+     first, Finnhub only as fallback), so the `finnhub_quotes` catalog
+     source never actually polled Finnhub on a healthy day — silently
+     redundant with `yfinance_quotes`, and a latent `reliability_tier`/
+     `source_name` mismatch if the two catalog scores ever diverged. Fixed
+     to route each catalog source to its own vendor call; `get_quote()`'s
+     fallback behavior is reserved for Phase 10's live-read path, which
+     genuinely wants "any working quote," not a scheduled per-vendor poll.
+
+   Live run produced: 1 real quote (full field set confirmed), 1
+   instrument reference row, 4 daily bars, 1 fundamentals snapshot, 977
+   real analyst ratings, and 1018 real `document_chunks` from 25 actual
+   AAPL SEC filings — embedded, batched, no crash. Finnhub/FRED/Banxico
+   correctly failed or skipped (no credentials yet) without aborting the
+   run. Banxico/FRED series ids for USD/MXN and GDP still need confirming
+   once `BANXICO_SIE_TOKEN` exists — a data task, not a code blocker.
 9. **Phase 10 — Retrieval**: `sql_retriever.py` (Axis 2, typed) and
    `vector_retriever.py` (Axis 3), assembled in `s10-06`'s stated order —
    *cheap and excluding first, expensive and fine last, soft at the close*:

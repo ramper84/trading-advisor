@@ -5,17 +5,17 @@ from app.ingest.catalog import Axis, IngestionDecision, load_catalog
 CATALOG_PATH = Path(__file__).resolve().parent.parent / "data_catalog.yaml"
 
 
-def test_catalog_loads_twelve_sources():
-    """9 included + 3 deliberately-excluded-with-a-written-reason
-    (articles/s06-02, ADR-006): tradingview_community, google_finance,
-    investing_com_calendar."""
+def test_catalog_loads_fifteen_sources():
+    """12 included (ADR-006 + ADR-007's three new yfinance-derived sources)
+    + 3 deliberately-excluded-with-a-written-reason (articles/s06-02):
+    tradingview_community, google_finance, investing_com_calendar."""
     catalog = load_catalog(CATALOG_PATH)
-    assert len(catalog.sources) == 12
+    assert len(catalog.sources) == 15
 
 
-def test_nine_sources_currently_included():
+def test_twelve_sources_currently_included():
     catalog = load_catalog(CATALOG_PATH)
-    assert len(catalog.included_sources()) == 9
+    assert len(catalog.included_sources()) == 12
 
 
 def test_axis_split_matches_architecture_decision():
@@ -23,6 +23,9 @@ def test_axis_split_matches_architecture_decision():
     assert {s.name for s in catalog.by_axis(Axis.SQL_RETRIEVAL)} == {
         "yfinance_quotes",
         "finnhub_quotes",
+        "yfinance_daily_bars",
+        "yfinance_fundamentals",
+        "yfinance_analyst_ratings",
         "banxico_sie",
         "fred_economic_data",
     }

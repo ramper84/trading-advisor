@@ -146,7 +146,11 @@ on a locally-run TradingView Desktop app. Both are gone, not paused — see
       (2026-09-10, ADR-007) — scoped into Phase 9: OHLCV, instrument
       reference, fundamentals/valuation, analyst ratings, technical
       indicators (mostly free from data already fetched)
-- [ ] Phase 9 (scheduled refresh; 7 new/widened tables —
-      `market_observations`, `instruments`, `daily_bars`, `fundamentals`,
-      `analyst_ratings`, `economic_indicators`, `monitored_symbols`) —
-      next up
+- [x] Phase 9 — scheduled refresh, 7 tables, 5 new parsers, `refresh_worker`
+      wired end to end. Verified live against a real Postgres instance with
+      real data (1018 SEC filing chunks, 977 analyst ratings, a fully
+      populated quote row) — 4 real bugs found and fixed along the way
+      (`.env` comment-parsing, an embedding token-limit crash, a `yfinance`
+      library quirk, a Finnhub routing bug). 74 tests passing.
+- [ ] Phase 10 (retrieval: SQL + vector, hybrid search, temporal
+      weighting) — next up

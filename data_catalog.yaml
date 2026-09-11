@@ -50,6 +50,111 @@ sources:
       No official SLA from Yahoo — the package can break on upstream
       changes without notice. No API key required.
 
+  - name: yfinance_daily_bars
+    description: >
+      Adjusted-close daily OHLCV bars per monitored symbol, via yfinance's
+      Ticker.history(auto_adjust=True) — the chart backbone (ADR-007).
+      Axis 2 (SQL-retrieval), feeds daily_bars, a different grain from
+      yfinance_quotes's intraday ticks.
+    location: "https://query1.finance.yahoo.com (via the yfinance package, Ticker.history)"
+    owner_technical: trading-advisor
+    owner_business: operator
+    format: json
+    axis: sql_retrieval
+    volume:
+      records: "one bar per symbol per trading day"
+      size_mb: small
+    refresh:
+      declared: "daily, after market close — a bar isn't final until the session ends"
+      interval_seconds: 86400
+      observed_last_update: n/a
+      observed_lag_days: 0
+    quality:
+      completeness: 5
+      consistency: 5
+      actuality: 5
+      reliability: 4
+    sensitivity:
+      contains_pii: false
+    lineage:
+      upstream: yahoo_finance_unofficial_api
+      transformations: []
+    decision: include
+    notes: >
+      Added 2026-09-10 (ADR-007). No API key required. Today's still-
+      forming bar comes back with NaN OHLC while the market is open —
+      parsed out, not persisted as if it were closed.
+
+  - name: yfinance_fundamentals
+    description: >
+      Valuation ratios (P/E, P/B, EV/EBITDA, dividend yield) and reported
+      financials (revenue, net income, EPS, margins, debt/equity, ROE) per
+      monitored symbol, via yfinance's Ticker.info + quarterly_financials +
+      quarterly_balance_sheet. Axis 2 (SQL-retrieval), feeds fundamentals.
+    location: "https://query1.finance.yahoo.com (via the yfinance package, Ticker.info/quarterly_financials)"
+    owner_technical: trading-advisor
+    owner_business: operator
+    format: json
+    axis: sql_retrieval
+    volume:
+      records: "one snapshot per symbol per refresh — the underlying data only changes quarterly"
+      size_mb: small
+    refresh:
+      declared: "daily poll — cheap to check, even though the data itself only changes on earnings"
+      interval_seconds: 86400
+      observed_last_update: n/a
+      observed_lag_days: 0
+    quality:
+      completeness: 4
+      consistency: 4
+      actuality: 4
+      reliability: 4
+    sensitivity:
+      contains_pii: false
+    lineage:
+      upstream: yahoo_finance_unofficial_api
+      transformations: [valuation_and_financials_merged_per_s10-05]
+    decision: include
+    notes: >
+      Added 2026-09-10 (ADR-007). No API key required. ROE here is a
+      single-quarter net-income-over-equity proxy, not an annualized TTM
+      figure — a stated v1 simplification, not a silent approximation.
+
+  - name: yfinance_analyst_ratings
+    description: >
+      Analyst rating-change events (upgrade/downgrade + firm) per
+      monitored symbol, via yfinance's Ticker.upgrades_downgrades. Axis 2
+      (SQL-retrieval) — a rating change is a dated fact with a firm
+      attached, not paraphrastic content.
+    location: "https://query1.finance.yahoo.com (via the yfinance package, Ticker.upgrades_downgrades)"
+    owner_technical: trading-advisor
+    owner_business: operator
+    format: json
+    axis: sql_retrieval
+    volume:
+      records: "variable — bursty around earnings, silent otherwise"
+      size_mb: small
+    refresh:
+      declared: "daily poll"
+      interval_seconds: 86400
+      observed_last_update: n/a
+      observed_lag_days: 0
+    quality:
+      completeness: 4
+      consistency: 4
+      actuality: 4
+      reliability: 4
+    sensitivity:
+      contains_pii: false
+    lineage:
+      upstream: yahoo_finance_unofficial_api
+      transformations: []
+    decision: include
+    notes: >
+      Added 2026-09-10 (ADR-007). No API key required. Returns None (not
+      an empty list) for a symbol with no rating history — handled
+      explicitly, not treated as an error.
+
   - name: finnhub_quotes
     description: >
       Secondary/fallback quote source, same shape as yfinance_quotes. Used

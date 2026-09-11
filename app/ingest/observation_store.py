@@ -7,15 +7,17 @@ in Phase 10 — this module only writes, matching the offline/online split
 from __future__ import annotations
 
 import psycopg
-from psycopg.types.json import Json
 
 from app.ingest.parsers.quotes_parser import MarketObservationRecord
 from app.services.db import get_connection
 
 _INSERT_SQL = """
     INSERT INTO market_observations (
-        symbol, observed_at, price, bid, ask, volume, indicators, source_name, reliability_tier
-    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        symbol, observed_at, price, previous_close, bid, ask, volume,
+        open, day_high, day_low, year_high, year_low,
+        fifty_day_average, two_hundred_day_average, market_cap,
+        source_name, reliability_tier
+    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
 """
 
 
@@ -28,10 +30,18 @@ def _insert_all(conn: psycopg.Connection, records: list[MarketObservationRecord]
                     record.symbol,
                     record.observed_at,
                     record.price,
+                    record.previous_close,
                     record.bid,
                     record.ask,
                     record.volume,
-                    Json(record.indicators),
+                    record.open,
+                    record.day_high,
+                    record.day_low,
+                    record.year_high,
+                    record.year_low,
+                    record.fifty_day_average,
+                    record.two_hundred_day_average,
+                    record.market_cap,
                     record.source_name,
                     record.reliability_tier,
                 ),
