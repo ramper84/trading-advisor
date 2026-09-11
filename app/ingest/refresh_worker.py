@@ -48,14 +48,27 @@ logger = logging.getLogger(__name__)
 POLL_INTERVAL_SECONDS = 60  # how often the worker wakes to check which sources are due
 
 # Banxico/FRED series this project tracks. FRED's ids are well-known and
-# stable; Banxico's own ids still need confirming against a real
-# BANXICO_SIE_TOKEN (ARCHITECTURE.md §8's reserved slot) — left empty
-# until then, not guessed.
+# stable. Banxico's own ids were confirmed live against the real SIE API
+# (2026-09-10, real BANXICO_SIE_TOKEN) — each id below was verified to
+# resolve to the titled series with real recent data before being added
+# here, not guessed from memory (ARCHITECTURE.md §8's reserved slot,
+# now resolved).
 FRED_SERIES = {
     "FEDFUNDS": "Federal Funds Effective Rate",
     "CPIAUCSL": "US CPI (All Urban Consumers)",
 }
-BANXICO_SERIES: dict[str, str] = {}
+# FRED returns a series' ENTIRE history with no observation_start bound —
+# 1823 rows landed for two series on a live, unbounded first poll
+# (2026-09-11), most of it CPIAUCSL back to 1947. A grounding-context tool
+# needs recent values, not a research archive; Banxico's own /datos/oportuno
+# endpoint already returns just the latest observation, so this bound is
+# FRED-specific.
+FRED_LOOKBACK_DAYS = 730
+BANXICO_SERIES = {
+    "SF61745": "Tasa objetivo (Overnight Target Rate)",
+    "SF43718": "Tipo de cambio FIX (USD/MXN)",
+    "SP30578": "INPC variación anual (Annual Inflation Rate)",
+}
 
 
 def get_monitored_symbols(conn: psycopg.Connection) -> list[str]:
@@ -171,8 +184,9 @@ def refresh_economic_data(catalog_source: CatalogSource, conn: psycopg.Connectio
         if not settings.fred_api_key:
             logger.warning("FRED_API_KEY not set, skipping fred_economic_data")
             return
+        observation_start = (datetime.now(timezone.utc) - timedelta(days=FRED_LOOKBACK_DAYS)).strftime("%Y-%m-%d")
         for series_id, series_name in FRED_SERIES.items():
-            raw = economic_data_parser.fetch_fred_series(series_id, settings.fred_api_key)
+            raw = economic_data_parser.fetch_fred_series(series_id, settings.fred_api_key, observation_start)
             records = economic_data_parser.parse_fred_series(raw, series_id, series_name)
             upsert_economic_observations(records, conn=conn)
     elif catalog_source.name == "banxico_sie":

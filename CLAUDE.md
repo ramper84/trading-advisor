@@ -139,11 +139,13 @@ persisted. Findings and the resulting scope: full record in
   computation — done in `analysis/technical_indicators.py` from
   `daily_bars` at query time (cheap over a bounded window), deterministic,
   no LLM import, matching `trending.py`'s own existing rule.
-- **Macro context**: `FEDFUNDS`/`CPIAUCSL` (FRED) were already confirmed;
-  `DEXMXUS` (USD/MXN) and a GDP series are identified but not yet wired.
-  Banxico's own series ids (overnight rate, INPC, USD/MXN fix) still need
-  confirming against a real `BANXICO_SIE_TOKEN` — noted as a Phase 9
-  follow-up, not blocked on architecture.
+- **Macro context**: `FEDFUNDS`/`CPIAUCSL` (FRED) confirmed. Banxico's own
+  series ids — `SF61745` (overnight target rate), `SF43718` (USD/MXN FIX,
+  the authoritative daily reference, not the settlement-date variant),
+  `SP30578` (INPC annual inflation %, not the raw index level — directly
+  interpretable) — confirmed live against the real SIE API with a real
+  token, 2026-09-11, and wired into `refresh_worker.py`'s `BANXICO_SERIES`.
+  A FRED-side GDP series remains unidentified — reserved, not blocking.
 - **Explicitly not built**: per-article sentiment tagging (would add an
   LLM call per ingested article — cost multiplier, deferred, reserved
   slot). Portfolio tracking (buy price/cost basis/P&L) stays fully out of
@@ -407,8 +409,29 @@ phases the prior architecture skipped:
    real analyst ratings, and 1018 real `document_chunks` from 25 actual
    AAPL SEC filings — embedded, batched, no crash. Finnhub/FRED/Banxico
    correctly failed or skipped (no credentials yet) without aborting the
-   run. Banxico/FRED series ids for USD/MXN and GDP still need confirming
-   once `BANXICO_SIE_TOKEN` exists — a data task, not a code blocker.
+   run.
+
+   **Second live pass (2026-09-11), real `FINNHUB_API_KEY`/
+   `BANXICO_SIE_TOKEN`/`FRED_API_KEY` now set, two monitored symbols
+   (`AAPL`, `WALMEX.MX` — the BMV coverage claim, exercised for real, not
+   just asserted).** Banxico's own series ids were confirmed live against
+   the real SIE API before being wired in — `SF61745` (overnight target
+   rate), `SF43718` (USD/MXN FIX, the authoritative daily reference, not
+   the settlement-date variant), `SP30578` (INPC annual inflation %, not
+   the raw index level). One more real bug found and fixed: **FRED returns
+   a series' entire history with no bound** — an unbounded first call
+   pulled 1823 rows, `CPIAUCSL` back to 1954. `fetch_fred_series()` now
+   takes an `observation_start` and `refresh_worker.py` passes a 2-year
+   lookback (`FRED_LOOKBACK_DAYS`); the same live series then landed 49
+   rows. Two more things surfaced that are vendor behavior, not bugs:
+   Yahoo Finance has no fundamentals data for `WALMEX.MX` (404, handled by
+   the existing try/except, not a crash) — an external data gap on a
+   Mexican filer, not something to fix here; and Finnhub's free tier
+   returns 403 for non-US-exchange symbols entirely (confirmed by calling
+   Finnhub directly for `WALMEX.MX` outside the worker) — expected, and
+   exactly why `yfinance` is this project's primary source for BMV
+   coverage, with Finnhub redundancy scoped to US tickers only. 76 tests
+   passing.
 9. **Phase 10 — Retrieval**: `sql_retriever.py` (Axis 2, typed) and
    `vector_retriever.py` (Axis 3), assembled in `s10-06`'s stated order —
    *cheap and excluding first, expensive and fine last, soft at the close*:

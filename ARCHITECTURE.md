@@ -314,11 +314,6 @@ loader → parser → normalizer → (chunk → embed, for Axis-3 sources) → s
   article — a real cost multiplier for no proven benefit over computing
   `stance` once, at analysis time, from the retrieved set. Reserved, not
   built.
-- **Confirming Banxico's own series ids** (overnight rate, INPC, USD/MXN
-  fix — ADR-007). FRED's `FEDFUNDS`/`CPIAUCSL`/`DEXMXUS` are well-known and
-  already assumed; Banxico's equivalents need a real `BANXICO_SIE_TOKEN` to
-  look up and verify — a data task blocked on credentials, not on
-  architecture.
 - ~~`alpaca-core` / `alpaca-mcp`~~ — deleted (ADR-001).
 - ~~`tradingview-mcp-jarp` dependency~~ — dropped (ADR-004).
 - ~~`reddit_mentions`~~ — dropped entirely, not merely excluded-with-reason
@@ -328,6 +323,11 @@ loader → parser → normalizer → (chunk → embed, for Axis-3 sources) → s
   — considered and excluded-with-a-written-reason in `data_catalog.yaml`
   (ADR-006); not a reserved slot to reopen without new information (no
   public API exists for any of the three as of 2026-09-10).
+- ~~Confirming Banxico's own series ids~~ — resolved 2026-09-11, live
+  against the real SIE API with a real token: `SF61745` (overnight target
+  rate), `SF43718` (USD/MXN FIX), `SP30578` (INPC annual inflation %),
+  wired into `refresh_worker.py`'s `BANXICO_SERIES`. A FRED-side GDP series
+  remains unidentified — that piece alone stays open, not the whole item.
 
 ## Appendix — Architecture Decision Records
 
@@ -544,3 +544,15 @@ loader → parser → normalizer → (chunk → embed, for Axis-3 sources) → s
   `document_chunks` from 25 actual SEC filings, 977 real analyst ratings,
   and a fully populated `market_observations` row — no invented numbers in
   this record.
+- **Second verification (2026-09-11)**: real `FINNHUB_API_KEY`/
+  `BANXICO_SIE_TOKEN`/`FRED_API_KEY` obtained, `AAPL` + `WALMEX.MX` both
+  seeded — the BMV coverage claim exercised for real. Banxico's series ids
+  confirmed live (§8's now-resolved item). One more real bug: FRED returns
+  a series' entire history with no bound (1823 rows on an unbounded first
+  call) — `fetch_fred_series` now takes `observation_start`,
+  `refresh_worker.py` passes a 2-year lookback, the same call then landed
+  49 rows. Two vendor-behavior findings, not bugs: Yahoo has no
+  fundamentals data for `WALMEX.MX` (404, handled, not a crash); Finnhub's
+  free tier 403s entirely for non-US-exchange symbols, confirmed by
+  calling Finnhub directly — expected, and the reason `yfinance` (not
+  Finnhub) is this project's BMV-coverage source.

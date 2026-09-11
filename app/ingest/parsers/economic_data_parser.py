@@ -67,11 +67,21 @@ def parse_banxico_series(raw: dict, series_name: str) -> list[RawEconomicObserva
     return observations
 
 
-def fetch_fred_series(series_id: str, api_key: str) -> dict:
-    return fetch_json(
-        FRED_SERIES_URL,
-        params={"series_id": series_id, "api_key": api_key, "file_type": "json"},
-    )
+def fetch_fred_series(series_id: str, api_key: str, observation_start: str | None = None) -> dict:
+    """observation_start (YYYY-MM-DD) bounds the pull to recent history.
+    FRED's default with no bound returns the ENTIRE series — for CPIAUCSL
+    that's back to 1947 (1823 rows landed on a live, unbounded first poll,
+    2026-09-11) — far more than a grounding-context tool needs, and it
+    re-pulls the same full history on every scheduled refresh.
+    refresh_worker.py passes a bounded lookback by default; Banxico's own
+    /datos/oportuno endpoint (economic_data_parser's other fetch function)
+    already returns only the latest observation, so this asymmetry was
+    FRED-specific.
+    """
+    params = {"series_id": series_id, "api_key": api_key, "file_type": "json"}
+    if observation_start:
+        params["observation_start"] = observation_start
+    return fetch_json(FRED_SERIES_URL, params=params)
 
 
 def parse_fred_series(raw: dict, series_id: str, series_name: str) -> list[RawEconomicObservation]:

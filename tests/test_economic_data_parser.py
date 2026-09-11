@@ -1,6 +1,7 @@
 from datetime import date
 
 from app.ingest.parsers.economic_data_parser import (
+    fetch_fred_series,
     parse_banxico_series,
     parse_fred_series,
 )
@@ -55,3 +56,34 @@ def test_parse_fred_series_drops_the_dot_null_marker():
     assert obs.observed_on == date(2026, 8, 1)
     assert obs.source_name == "fred_economic_data"
     assert obs.country == "US"
+
+
+def test_fetch_fred_series_includes_observation_start_when_given(monkeypatch):
+    """Regression guard: FRED returns a series' ENTIRE history (1823 rows
+    landed on a live unbounded call, 2026-09-11) unless observation_start
+    is passed — never call FRED without it."""
+    captured = {}
+
+    def fake_fetch_json(url, params=None, headers=None):
+        captured["params"] = params
+        return {"observations": []}
+
+    monkeypatch.setattr("app.ingest.parsers.economic_data_parser.fetch_json", fake_fetch_json)
+
+    fetch_fred_series("FEDFUNDS", "fake-key", observation_start="2024-09-11")
+
+    assert captured["params"]["observation_start"] == "2024-09-11"
+
+
+def test_fetch_fred_series_omits_observation_start_when_not_given(monkeypatch):
+    captured = {}
+
+    def fake_fetch_json(url, params=None, headers=None):
+        captured["params"] = params
+        return {"observations": []}
+
+    monkeypatch.setattr("app.ingest.parsers.economic_data_parser.fetch_json", fake_fetch_json)
+
+    fetch_fred_series("FEDFUNDS", "fake-key")
+
+    assert "observation_start" not in captured["params"]

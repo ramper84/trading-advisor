@@ -139,18 +139,23 @@ on a locally-run TradingView Desktop app. Both are gone, not paused — see
 - [x] `alpaca-core` / `alpaca-mcp` — deleted; orphaned by the first pivot
 - [x] Phase 1-8 done: repo scaffold, `data_catalog.yaml`, all parsers for
       the redesigned source list, `document_chunks` schema + embeddings
-- [x] `EDGAR_USER_AGENT`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` set
-- [ ] API keys/credentials still needed: `FINNHUB_API_KEY`,
-      `BANXICO_SIE_TOKEN`, `FRED_API_KEY` — external prerequisites, no code
+- [x] All credentials set: `EDGAR_USER_AGENT`, `OPENAI_API_KEY`,
+      `ANTHROPIC_API_KEY`, `FINNHUB_API_KEY`, `BANXICO_SIE_TOKEN`,
+      `FRED_API_KEY`
 - [x] Data-category audit against an 8-part market-data framework
       (2026-09-10, ADR-007) — scoped into Phase 9: OHLCV, instrument
       reference, fundamentals/valuation, analyst ratings, technical
       indicators (mostly free from data already fetched)
 - [x] Phase 9 — scheduled refresh, 7 tables, 5 new parsers, `refresh_worker`
-      wired end to end. Verified live against a real Postgres instance with
-      real data (1018 SEC filing chunks, 977 analyst ratings, a fully
-      populated quote row) — 4 real bugs found and fixed along the way
-      (`.env` comment-parsing, an embedding token-limit crash, a `yfinance`
-      library quirk, a Finnhub routing bug). 74 tests passing.
+      wired end to end. Verified live twice against a real Postgres
+      instance: once with `AAPL` only (1018 SEC filing chunks, 977 analyst
+      ratings), once with `AAPL` + `WALMEX.MX` after all credentials were
+      obtained — the BMV-coverage claim exercised for real, not just
+      asserted. 5 real bugs found and fixed (`.env` comment-parsing, an
+      embedding token-limit crash, a `yfinance` library quirk, a Finnhub
+      routing bug, an unbounded FRED history pull). 76 tests passing.
+- [x] `FINNHUB_API_KEY`, `BANXICO_SIE_TOKEN`, `FRED_API_KEY` obtained and
+      set — all nine included sources now have real credentials where
+      needed (Banxico series ids confirmed live too)
 - [ ] Phase 10 (retrieval: SQL + vector, hybrid search, temporal
       weighting) — next up
