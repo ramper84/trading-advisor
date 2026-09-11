@@ -43,6 +43,12 @@ from app.services import market_data
 from app.services.db import get_connection
 
 logging.basicConfig(level=logging.INFO)
+# httpx logs each request's full URL at INFO and propagates to root by
+# default. FRED_API_KEY travels as a query parameter (fetch_fred_series),
+# not a header — at root INFO level it would land in plaintext in every
+# container log line, every scheduled poll, forever (2026-09-10, live
+# verification: a real key was seen in a raw httpx INFO log line).
+logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 POLL_INTERVAL_SECONDS = 60  # how often the worker wakes to check which sources are due
@@ -131,10 +137,28 @@ def refresh_analyst_ratings(symbol: str, catalog_source: CatalogSource, conn: ps
     insert_analyst_ratings(records, conn=conn)
 
 
+def _latest_filing_date(conn: psycopg.Connection, symbol: str) -> datetime | None:
+    """The most recent already-ingested filing's published_at for this
+    symbol, used to bound fetch_recent_filings. Regression guard
+    (2026-09-10, live verification): omitting `since` made every poll
+    re-fetch a large filer's ENTIRE tracked-form history from SEC — 140+
+    individual document HTTP requests for AAPL alone — forever, even
+    though document_chunks' source_hash already skips the resulting
+    no-op writes. The waste was at the fetch layer, not the write layer."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT MAX(published_at) FROM document_chunks WHERE symbol = %s AND source_name = %s",
+            (symbol, "sec_edgar_filings"),
+        )
+        row = cur.fetchone()
+        return row[0] if row else None
+
+
 def refresh_filings(symbol: str, catalog_source: CatalogSource, conn: psycopg.Connection) -> None:
     settings = get_settings()
     cik = edgar_parser.resolve_cik(symbol, settings.edgar_user_agent)
-    filings = edgar_parser.fetch_recent_filings(cik, settings.edgar_user_agent)
+    since = _latest_filing_date(conn, symbol)
+    filings = edgar_parser.fetch_recent_filings(cik, settings.edgar_user_agent, since=since)
     documents = []
     for filing in filings:
         raw_html = edgar_parser.fetch_filing_document(

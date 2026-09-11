@@ -69,7 +69,12 @@ def fetch_recent_filings(
         if form not in TRACKED_FORMS:
             continue
         filed_at = datetime.fromisoformat(recent["filingDate"][i])
-        if since and filed_at <= since:
+        # SEC's filingDate is a plain date string (no time component), so
+        # filed_at is always naive; since may be timezone-aware (it's read
+        # back from a timestamptz column) — compare at date granularity,
+        # which is all filingDate actually carries, rather than risk a
+        # naive/aware TypeError (2026-09-10, live verification).
+        if since and filed_at.date() <= since.date():
             continue
         filings.append(
             {

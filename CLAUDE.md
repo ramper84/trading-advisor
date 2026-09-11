@@ -445,6 +445,72 @@ phases the prior architecture skipped:
    `low_confidence` rather than forcing an answer (`s09-03`). Query
    expansion/decomposition and reranking are **not** built here — see §2's
    ADR and Phase 16 respectively.
+
+   **Done (2026-09-10).** `sql_retriever.py` (typed reads across
+   `instruments`, `market_observations`, `daily_bars`, `fundamentals`,
+   `analyst_ratings`, `economic_indicators`, `monitored_symbols`, plus an
+   `analyses` reader that only resolves once Phase 12 creates that table),
+   `hybrid_search.py` (`content_tsv`/GIN lexical branch + `s10-03`'s RRF,
+   fused by rank position only), `temporal.py` (news half-life decay via
+   `TEMPORAL_HALF_LIFE_DAYS_NEWS`; `sec_edgar_filings` gets the
+   "validity-flips" treatment instead — the most recent filing per
+   `(symbol, form_type)` keeps full weight, older filings of the same form
+   type are fixed-discounted, not smooth-decayed), `vector_retriever.py`
+   (the full (a)-(d) orchestration above). 25 new tests, all mocking the DB
+   connection/embedding call — no network calls; 106 passing total.
+
+   **Live verification (2026-09-10)**, temporary dev Postgres on port 5433
+   (never touching `fantasy-postgres-1` on 5432, confirmed healthy
+   throughout and after teardown): real SEC filings + Finnhub/Yahoo news
+   embedded for `AAPL` (1265 `document_chunks`), real quotes/daily
+   bars/fundamentals/analyst ratings/economic indicators (US + MX) ingested,
+   then `retrieve()` run against real embeddings with two real queries — a
+   paraphrased one correctly soft-failed (`low_confidence=True`, distance
+   0.399 > 0.35) and a near-verbatim one correctly cleared the threshold
+   (`low_confidence=False`, distance 0.306, Risk Factors chunks ranked top),
+   confirming `s09-03`'s soft-fail gate actually discriminates rather than
+   always tripping or never tripping. `sql_retriever.py` verified against
+   real rows for every table it reads.
+
+   Three real bugs found and fixed, live only — none caught by unit tests
+   against mocked shapes:
+   - **`refresh_filings` never bounded its SEC EDGAR pull**: called
+     `fetch_recent_filings()` with no `since`, so every scheduled poll
+     re-fetched a large filer's *entire* tracked-form history — 140+
+     individual document HTTP requests for `AAPL` alone, forever, even
+     though `document_chunks`' `source_hash` already made the resulting
+     writes no-ops. The waste was at the fetch layer, `source_hash` only
+     ever protected the write layer. Fixed with `_latest_filing_date()` (a
+     `MAX(published_at)` read per symbol) passed as `since`; re-verified
+     live — the second `refresh_filings` call made 2 lightweight metadata
+     requests instead of 140+ document fetches, with the chunk count
+     unchanged.
+   - **That fix then hit a naive/aware `datetime` comparison**: SEC's
+     `filingDate` is a plain date string (`fetch_recent_filings` parses it
+     naive), but `since` comes back timezone-aware from a `timestamptz`
+     column — direct comparison raised `TypeError`. Fixed by comparing
+     `.date()` on both sides, the only granularity `filingDate` actually
+     carries.
+   - **`semantic_search`'s cosine-distance parameter had no target type**:
+     unlike `embed_and_store`'s `INSERT` into a `Vector`-typed column (which
+     lets `pgvector`'s adapter infer the type), a bare query parameter
+     compared via `<=>` has no column context — passing a plain Python list
+     raised `operator does not exist: vector <=> double precision[]`. Fixed
+     with an explicit `%s::vector` cast on both the `SELECT`'s distance
+     expression and its `ORDER BY`.
+
+   A fourth, non-retrieval finding surfaced incidentally during this pass
+   and was fixed on the spot since it's a live credential-safety issue:
+   **`refresh_worker.py`'s `logging.basicConfig(level=logging.INFO)`
+   let `httpx`'s own request logger propagate to root at INFO**, and
+   `fetch_fred_series()` sends `FRED_API_KEY` as a query parameter (FRED
+   has no header-auth option) — so every scheduled poll would log the key
+   in plaintext to container logs, forever. A real key was seen in a raw
+   log line during this verification. Fixed with
+   `logging.getLogger("httpx").setLevel(logging.WARNING)` in
+   `refresh_worker.py`; re-verified live — no URL/key appears in output
+   after the fix. **The user was advised to rotate the exposed
+   `FRED_API_KEY` as a precaution**, independent of the code fix.
 10. **Phase 11 — Augmentation**: `POST /analyze` assembles both retrieval
     types into one structured, XML-delimited context (`articles/s09-04`).
     The Axis-2 side (§7's ADR-007) now includes the instrument's reference

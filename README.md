@@ -157,5 +157,20 @@ on a locally-run TradingView Desktop app. Both are gone, not paused — see
 - [x] `FINNHUB_API_KEY`, `BANXICO_SIE_TOKEN`, `FRED_API_KEY` obtained and
       set — all nine included sources now have real credentials where
       needed (Banxico series ids confirmed live too)
-- [ ] Phase 10 (retrieval: SQL + vector, hybrid search, temporal
-      weighting) — next up
+- [x] Phase 10 — retrieval layer: `sql_retriever.py` (Axis 2),
+      `hybrid_search.py` + `temporal.py` + `vector_retriever.py` (Axis 3,
+      hard filter → RRF-fused semantic+lexical → temporal weighting →
+      distance-threshold soft-fail). 106 tests passing. Verified live
+      against real embedded `AAPL` data — the soft-fail gate confirmed
+      both ways (a paraphrased query correctly abstains, a near-verbatim
+      one correctly answers). Four real bugs found and fixed: an
+      unbounded SEC EDGAR refetch, a naive/aware `datetime` comparison, a
+      missing `::vector` cast, and an `httpx`-logging gap that would have
+      leaked `FRED_API_KEY` into container logs on every scheduled poll
+      (see `ARCHITECTURE.md`'s ADR-008). **A real `FRED_API_KEY` was seen
+      in plaintext in a verification log line before the logging fix
+      landed — rotate this key at
+      https://fredaccount.stlouisfed.org/apikey if that hasn't been done
+      yet.**
+- [ ] Phase 11 (augmentation: `POST /analyze` assembles SQL + vector
+      retrieval into one structured context) — next up

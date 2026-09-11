@@ -155,3 +155,69 @@ def _fake_quote(symbol, source_name):
     from app.services.market_data import Quote
 
     return Quote(symbol=symbol, price=1.0, previous_close=None, volume=None, observed_at=datetime.now(timezone.utc), source_name=source_name)
+
+
+def test_latest_filing_date_reads_max_published_at():
+    from datetime import datetime, timezone
+
+    conn = MagicMock()
+    cursor = MagicMock()
+    cursor.fetchone.return_value = (datetime(2026, 7, 30, tzinfo=timezone.utc),)
+    conn.cursor.return_value.__enter__.return_value = cursor
+
+    result = refresh_worker._latest_filing_date(conn, "AAPL")
+
+    assert result == datetime(2026, 7, 30, tzinfo=timezone.utc)
+    sql, params = cursor.execute.call_args[0]
+    assert "MAX(published_at)" in sql
+    assert params == ("AAPL", "sec_edgar_filings")
+
+
+def test_refresh_filings_bounds_fetch_by_latest_ingested_date(monkeypatch):
+    """Regression guard (2026-09-10, live verification): without a `since`
+    bound, refresh_filings re-fetched a large filer's ENTIRE tracked-form
+    history from SEC on every poll (140+ document requests for AAPL alone)
+    even though source_hash already made the resulting writes no-ops —
+    the waste was at the fetch layer, not the write layer."""
+    from datetime import datetime, timezone
+
+    catalog = load_catalog(CATALOG_PATH)
+    source = catalog.get("sec_edgar_filings")
+    latest = datetime(2026, 7, 30, tzinfo=timezone.utc)
+
+    monkeypatch.setattr(refresh_worker, "_latest_filing_date", lambda conn, symbol: latest)
+    monkeypatch.setattr(refresh_worker.edgar_parser, "resolve_cik", lambda symbol, ua: "320193")
+
+    captured = {}
+
+    def fake_fetch_recent_filings(cik, user_agent, since=None):
+        captured["since"] = since
+        return []
+
+    monkeypatch.setattr(refresh_worker.edgar_parser, "fetch_recent_filings", fake_fetch_recent_filings)
+    monkeypatch.setattr(refresh_worker, "embed_and_store", lambda documents, conn=None: 0)
+
+    refresh_worker.refresh_filings("AAPL", source, conn=MagicMock())
+
+    assert captured["since"] == latest
+
+
+def test_refresh_filings_passes_none_since_on_first_ingest(monkeypatch):
+    catalog = load_catalog(CATALOG_PATH)
+    source = catalog.get("sec_edgar_filings")
+
+    monkeypatch.setattr(refresh_worker, "_latest_filing_date", lambda conn, symbol: None)
+    monkeypatch.setattr(refresh_worker.edgar_parser, "resolve_cik", lambda symbol, ua: "320193")
+
+    captured = {}
+
+    def fake_fetch_recent_filings(cik, user_agent, since=None):
+        captured["since"] = since
+        return []
+
+    monkeypatch.setattr(refresh_worker.edgar_parser, "fetch_recent_filings", fake_fetch_recent_filings)
+    monkeypatch.setattr(refresh_worker, "embed_and_store", lambda documents, conn=None: 0)
+
+    refresh_worker.refresh_filings("AAPL", source, conn=MagicMock())
+
+    assert captured["since"] is None

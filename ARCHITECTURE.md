@@ -556,3 +556,49 @@ loader → parser → normalizer → (chunk → embed, for Axis-3 sources) → s
   free tier 403s entirely for non-US-exchange symbols, confirmed by
   calling Finnhub directly — expected, and the reason `yfinance` (not
   Finnhub) is this project's BMV-coverage source.
+
+### ADR-008 — Retrieval layer built (Phase 10); a credential-logging gap found and closed (2026-09-10)
+
+- **Status**: Accepted.
+- **Context**: `CLAUDE.md` §7 Phase 10 scoped the retrieval layer
+  (`sql_retriever.py`, `hybrid_search.py`, `temporal.py`,
+  `vector_retriever.py`) but none of it existed yet — `retrieval/` held
+  only a docstring. This ADR records that build and its live verification,
+  the same discipline as ADR-007's Phase 9 record.
+- **Decision**: implement exactly the (a)-(d) order §2's Axis-3 row
+  already specified — hard symbol filter, semantic+lexical run fused by
+  RRF (position only), temporal weighting applied last over the fused
+  survivors, distance-threshold soft-fail at the close. `temporal.py`
+  implements the two-family split literally: news sources get exponential
+  half-life decay; `sec_edgar_filings` gets a fixed discount for
+  non-latest filings within the same `(symbol, form_type)` group, not a
+  smooth decay — the "validity flips" case §2 named but hadn't built.
+- **Verification (2026-09-10)**: temporary dev Postgres on port 5433
+  (`fantasy-postgres-1` on 5432 confirmed healthy, untouched, before and
+  after). Real SEC filings + Finnhub/Yahoo news embedded for `AAPL` (1265
+  `document_chunks`); real quotes/daily bars/fundamentals/analyst
+  ratings/economic indicators (US + MX) ingested. `vector_retriever.retrieve()`
+  run against real embeddings: a paraphrased query correctly soft-failed
+  (distance 0.399 > the 0.35 threshold), a near-verbatim query correctly
+  cleared it (distance 0.306, Risk Factors chunks ranked top) — the
+  soft-fail gate discriminates, confirmed both ways, not asserted from one
+  side only. `sql_retriever.py` verified against real rows across every
+  table it reads. Full outcome, including three retrieval-layer bugs found
+  and fixed live (an unbounded `refresh_filings` SEC pull, a naive/aware
+  `datetime` comparison that fix then exposed, and a missing `::vector`
+  cast on the semantic-search query parameter), is recorded in `CLAUDE.md`
+  §7's Phase 10 entry rather than duplicated here.
+- **A fourth finding, credential safety, not retrieval**: `refresh_worker.py`
+  sets root logging to INFO, and `httpx`'s request logger propagates to
+  root by default; `fetch_fred_series()` sends `FRED_API_KEY` as a query
+  parameter (FRED has no header-auth option), so every scheduled poll
+  would log the key in plaintext to container logs. A real key was seen in
+  a raw log line during this verification pass. **Decision**:
+  `refresh_worker.py` now sets `logging.getLogger("httpx").setLevel(logging.WARNING)`
+  explicitly — the one process in this codebase that talks to a
+  query-param-authenticated API needs to own suppressing that library's
+  default verbosity, rather than relying on every future logging
+  configuration to remember it. **The operator was advised to rotate the
+  exposed `FRED_API_KEY`** as a precaution, independent of the code fix —
+  a credential seen in a session transcript is treated as compromised
+  regardless of whether the transcript itself leaks further.
