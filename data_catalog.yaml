@@ -4,8 +4,15 @@
 # a source is an edit here (decision: include/exclude/review), not a code
 # change — this file IS the "multiple sources configured" the product asks
 # for.
-version: 1
-last_audited: "2026-09-06"
+#
+# Redesigned 2026-09-10 (ARCHITECTURE.md ADR-006): dropped reddit_mentions
+# entirely (no social/community feeds of any kind) and TradingView as an
+# ingested source (no public API, and its unique value — community-shared
+# analysis — is the same "grain of salt" category Reddit was excluded for).
+# Added yfinance_news, banxico_sie, fred_economic_data, elfinanciero_news,
+# el_economista_news (all confirmed live/free the same day).
+version: 2
+last_audited: "2026-09-10"
 
 sources:
   - name: yfinance_quotes
@@ -13,7 +20,8 @@ sources:
       Live quote + OHLCV bars per monitored symbol via the yfinance package
       (an unofficial Yahoo Finance wrapper). Primary structured source —
       Axis 2 (SQL-retrieval), feeds market_observations directly, no
-      embedding.
+      embedding. Confirmed to cover Bolsa Mexicana de Valores tickers via
+      the .MX suffix (e.g. WALMEX.MX, BOLSAA.MX), not just US/global.
     location: "https://query1.finance.yahoo.com (via the yfinance package)"
     owner_technical: trading-advisor
     owner_business: operator
@@ -24,6 +32,7 @@ sources:
       size_mb: small
     refresh:
       declared: "1-5 min, scheduled"
+      interval_seconds: 300
       observed_last_update: n/a
       observed_lag_days: 0
     quality:
@@ -55,6 +64,7 @@ sources:
       size_mb: small
     refresh:
       declared: "1-5 min, scheduled (same cadence as yfinance_quotes)"
+      interval_seconds: 300
       observed_last_update: n/a
       observed_lag_days: 0
     quality:
@@ -70,7 +80,9 @@ sources:
     decision: include
     notes: >
       Requires a free Finnhub API key (FINNHUB_API_KEY). Same key also
-      backs finnhub_news below — one signup covers both.
+      backs finnhub_news below — one signup covers both. Kept deliberately
+      (2026-09-10 redesign) as vendor redundancy against yfinance's lack of
+      an SLA, even though the operator's own daily habit is Yahoo Finance.
 
   - name: sec_edgar_filings
     description: >
@@ -88,6 +100,7 @@ sources:
       size_mb: medium (individual 10-Ks can run 50-150+ pages)
     refresh:
       declared: "hourly poll per monitored symbol — filings are event-driven, not scheduled from our side"
+      interval_seconds: 3600
       observed_last_update: n/a
       observed_lag_days: 0
     quality:
@@ -104,15 +117,15 @@ sources:
     notes: >
       Free, official, no key — but SEC requires a descriptive User-Agent
       header identifying the requester (EDGAR_USER_AGENT env var: "name
-      contact@email"). Chunked structurally by filing Item
-      (Item 1, Item 1A Risk Factors, Item 7 MD&A, ...), then recursively
-      within any Item still too large.
+      contact@email"). US-listed symbols only — no coverage for BMV-only
+      tickers, which is what banxico_sie/elfinanciero_news are for.
 
   - name: finnhub_news
     description: >
       Company news headlines + summaries per monitored symbol via
       Finnhub's /company-news endpoint. Short-form; one chunk per article,
-      no sub-chunking needed. Axis 3 (vector RAG).
+      no sub-chunking needed. Axis 3 (vector RAG). Secondary to
+      yfinance_news below, per the 2026-09-10 redesign.
     location: "https://finnhub.io/api/v1/company-news"
     owner_technical: trading-advisor
     owner_business: operator
@@ -123,6 +136,7 @@ sources:
       size_mb: small
     refresh:
       declared: "30 min, scheduled"
+      interval_seconds: 1800
       observed_last_update: n/a
       observed_lag_days: 0
     quality:
@@ -140,44 +154,307 @@ sources:
       Same FINNHUB_API_KEY as finnhub_quotes. Summaries, not full article
       text — Finnhub's free tier does not return full bodies.
 
-  - name: reddit_mentions
+  - name: yfinance_news
     description: >
-      Posts/comments mentioning a monitored symbol from finance-relevant
-      subreddits (r/wallstreetbets, r/stocks, r/investing), via PRAW.
-      Real signal exists but the source is anonymous, unverified, and
-      genuinely noisy — Axis 3 (vector RAG), deliberately scored lower on
-      reliability rather than treated as equal to news/filings.
-    location: "https://www.reddit.com/r/{wallstreetbets,stocks,investing} (via PRAW)"
+      Aggregated news headlines per symbol via yfinance's own Ticker.news
+      property (Yahoo Finance's own news aggregation) — matches the
+      operator's actual daily habit. Primary unstructured news source —
+      Axis 3 (vector RAG), with finnhub_news kept as a secondary/redundant
+      source.
+    location: "https://query1.finance.yahoo.com (via the yfinance package, Ticker.news)"
     owner_technical: trading-advisor
     owner_business: operator
     format: json
     axis: vector_rag
     volume:
-      records: "high and bursty — filtered at ingest by a minimum score/upvote threshold before it ever reaches chunking"
-      size_mb: small-medium
+      records: "several per symbol per day, variable"
+      size_mb: small
     refresh:
       declared: "30 min, scheduled"
+      interval_seconds: 1800
       observed_last_update: n/a
       observed_lag_days: 0
     quality:
-      completeness: 3
-      consistency: 2
+      completeness: 4
+      consistency: 4
       actuality: 5
+      reliability: 4
+    sensitivity:
+      contains_pii: false
+    lineage:
+      upstream: yahoo_finance_unofficial_api
+      transformations: []
+    decision: include
+    notes: >
+      Added 2026-09-10. No API key required — same package as
+      yfinance_quotes. Headline + summary only, same shape as
+      finnhub_news's intermediate representation.
+
+  - name: banxico_sie
+    description: >
+      Official Mexican central bank economic series — overnight rate
+      decisions, inflation (INPC), exchange rate — via Banxico's SIE
+      (Sistema de Información Económica) REST API. Structured, exact
+      entity+timestamp series, not prose — Axis 2 (SQL-retrieval), feeds a
+      new economic_indicators table, never document_chunks (there is
+      nothing here to embed).
+    location: "https://www.banxico.org.mx/SieAPIRest/service/v1/"
+    owner_technical: trading-advisor
+    owner_business: operator
+    format: json
+    axis: sql_retrieval
+    volume:
+      records: "a handful of series; rate decisions ~8x/year, inflation monthly"
+      size_mb: small
+    refresh:
+      declared: "daily poll — Banxico's own releases are infrequent and scheduled, not continuous"
+      interval_seconds: 86400
+      observed_last_update: n/a
+      observed_lag_days: 0
+    quality:
+      completeness: 5
+      consistency: 5
+      actuality: 5
+      reliability: 5
+    sensitivity:
+      contains_pii: false
+    lineage:
+      upstream: banxico_sie_api
+      transformations: []
+    decision: include
+    notes: >
+      Added 2026-09-10. Free, official, but requires registering for a
+      query token at
+      https://www.banxico.org.mx/SieAPIRest/service/v1/token
+      (BANXICO_SIE_TOKEN env var) — a 64-character string, sent via the
+      Bmx-Token header. TLS 1.3 required (Banxico policy since 2023-03-24).
+      Not tied to a monitored symbol — this is macro/economy-wide context,
+      hence its own economic_indicators table rather than
+      market_observations (articles/s10-05's schema-divergence rule: a
+      price tick and a named macro series are different entities, not
+      variations of one thing).
+
+  - name: fred_economic_data
+    description: >
+      Official US economic series — Fed funds rate, CPI inflation — via
+      the St. Louis Fed's FRED API. Same shape and table as banxico_sie;
+      Axis 2 (SQL-retrieval).
+    location: "https://api.stlouisfed.org/fred/"
+    owner_technical: trading-advisor
+    owner_business: operator
+    format: json
+    axis: sql_retrieval
+    volume:
+      records: "a handful of series, updated on the Fed's own release schedule"
+      size_mb: small
+    refresh:
+      declared: "daily poll — same reasoning as banxico_sie"
+      interval_seconds: 86400
+      observed_last_update: n/a
+      observed_lag_days: 0
+    quality:
+      completeness: 5
+      consistency: 5
+      actuality: 5
+      reliability: 5
+    sensitivity:
+      contains_pii: false
+    lineage:
+      upstream: fred_api
+      transformations: []
+    decision: include
+    notes: >
+      Added 2026-09-10, replacing the Investing.com economic-calendar idea
+      (see the investing_com_calendar exclusion below) with the actual
+      official source for the same US data. Free, no cost, no commercial
+      restriction — requires a free API key from
+      https://fredaccount.stlouisfed.org (FRED_API_KEY env var). Rate
+      limit 120 calls/min.
+
+  - name: elfinanciero_news
+    description: >
+      Mexican financial news via El Financiero's public RSS feed.
+      Company/market mentions matched by keyword against the feed's
+      headlines/summaries (RSS has no per-symbol query, unlike Finnhub's
+      /company-news). Axis 3 (vector RAG).
+    location: "https://www.elfinanciero.com.mx/arc/outboundfeeds/rss/?outputType=xml"
+    owner_technical: trading-advisor
+    owner_business: operator
+    format: xml
+    axis: vector_rag
+    volume:
+      records: "tens of articles/day across all sections, filtered to ones mentioning a monitored symbol/company"
+      size_mb: small
+    refresh:
+      declared: "30 min, scheduled"
+      interval_seconds: 1800
+      observed_last_update: "2026-09-10"
+      observed_lag_days: 0
+    quality:
+      completeness: 3
+      consistency: 4
+      actuality: 5
+      reliability: 4
+    sensitivity:
+      contains_pii: false
+    lineage:
+      upstream: elfinanciero_rss
+      transformations: [keyword_match_by_company_name]
+    decision: include
+    notes: >
+      Added 2026-09-10; confirmed live the same day — a properly formatted
+      RSS 2.0 feed, no account needed. completeness scored lower than the
+      per-symbol news APIs because the feed isn't symbol-scoped: most
+      articles won't mention any monitored symbol and are filtered out
+      client-side by company-name keyword match, a cruder filter than a
+      real per-symbol query endpoint.
+
+  - name: el_economista_news
+    description: >
+      Mexican financial news via El Economista's public RSS feed. Same
+      general-feed-plus-keyword-filter shape as elfinanciero_news — Axis 3
+      (vector RAG).
+    location: "https://www.eleconomista.com.mx/rss/ultimas-noticias"
+    owner_technical: trading-advisor
+    owner_business: operator
+    format: xml
+    axis: vector_rag
+    volume:
+      records: "~100 items per feed fetch across all sections, filtered to ones mentioning a monitored symbol/company"
+      size_mb: small
+    refresh:
+      declared: "30 min, scheduled"
+      interval_seconds: 1800
+      observed_last_update: "2026-09-10"
+      observed_lag_days: 0
+    quality:
+      completeness: 3
+      consistency: 4
+      actuality: 5
+      reliability: 4
+    sensitivity:
+      contains_pii: false
+    lineage:
+      upstream: eleconomista_rss
+      transformations: [keyword_match_by_company_name]
+    decision: include
+    notes: >
+      Added 2026-09-10; confirmed live the same day (100 current items,
+      dated today). Their site blocks generic automated fetches (returned
+      403 to a plain WebFetch/curl probe) but serves the feed normally to a
+      standard browser User-Agent — refresh_worker's HTTP client must send
+      one, or requests will be silently rejected. Only the general
+      "últimas noticias" feed is confirmed public; section-specific feed
+      slugs (sectorfinanciero, economia, empresas) returned 403 — not
+      necessarily nonexistent, just unconfirmed, so not relied upon.
+      completeness scored the same as elfinanciero_news for the same
+      not-symbol-scoped reason.
+
+  # --- Deliberately excluded (articles/s06-02: "a written record of why a
+  # source was excluded" beats a silent omission) ---
+
+  - name: tradingview_community
+    description: >
+      Considered and excluded 2026-09-10. TradingView has no public API;
+      the only access path is Chrome DevTools Protocol against a locally
+      running, logged-in Desktop app — the exact host-native deployment
+      constraint this project's second architecture (ADR-003/ADR-004)
+      deliberately removed. Its unique content — community-shared chart
+      analysis — is also the same "social sentiment, grain of salt"
+      category reddit_mentions was excluded for.
+    location: "https://www.tradingview.com (no public API)"
+    owner_technical: trading-advisor
+    owner_business: operator
+    format: "n/a"
+    axis: vector_rag
+    volume:
+      records: "n/a"
+      size_mb: "n/a"
+    refresh:
+      declared: "n/a"
+      interval_seconds: 0
+      observed_last_update: n/a
+      observed_lag_days: 0
+    quality:
+      completeness: 1
+      consistency: 1
+      actuality: 1
       reliability: 2
     sensitivity:
       contains_pii: false
     lineage:
-      upstream: reddit_api_praw
-      transformations: [min_score_filter, dedup_by_post_id]
-    decision: include
+      upstream: "n/a"
+      transformations: []
+    decision: exclude
     notes: >
-      Per articles/s06-02's own is_rag_ready rule (no dimension may drop
-      below ACCEPTABLE=3), this source does NOT clear the bar on its own —
-      reliability=2, consistency=2. Included anyway, by deliberate
-      exception, but every chunk carries reliability_tier="unverified" in
-      its metadata (see ARCHITECTURE.md §1): analysis_guard.py refuses to
-      let a BULLISH/BEARISH stance rest on Reddit chunks alone — at least
-      one reliability>=3 citation (news or filing) is required alongside
-      it. Sensitivity is "false" because Reddit usernames are already
-      pseudonymous/public social content about a ticker, not personal data
-      about an identifiable individual — revisit if that ever changes.
+      yfinance already covers BMV (.MX tickers) for the charting-data need
+      that motivated reconsidering TradingView. Kept as the operator's own
+      manual charting tool, entirely outside this system — nothing to build.
+
+  - name: google_finance
+    description: >
+      Considered and excluded 2026-09-10. Google shut down its Finance API
+      in 2012; the only remaining access is the GOOGLEFINANCE() Google
+      Sheets formula, not usable as a backend data source.
+    location: "https://www.google.com/finance (no API since 2012)"
+    owner_technical: trading-advisor
+    owner_business: operator
+    format: "n/a"
+    axis: sql_retrieval
+    volume:
+      records: "n/a"
+      size_mb: "n/a"
+    refresh:
+      declared: "n/a"
+      interval_seconds: 0
+      observed_last_update: n/a
+      observed_lag_days: 0
+    quality:
+      completeness: 1
+      consistency: 1
+      actuality: 1
+      reliability: 1
+    sensitivity:
+      contains_pii: false
+    lineage:
+      upstream: "n/a"
+      transformations: []
+    decision: exclude
+    notes: >
+      Confirmed 2026-09-10 — no public API exists in any form usable by a
+      backend service.
+
+  - name: investing_com_calendar
+    description: >
+      Considered and excluded 2026-09-10. Investing.com offers no free or
+      official API (confirmed against their own support docs) — only a
+      read-only embeddable widget, or paid third-party scrapers (Apify,
+      Parse.bot) of debatable ToS standing.
+    location: "https://www.investing.com/economic-calendar (no free API)"
+    owner_technical: trading-advisor
+    owner_business: operator
+    format: "n/a"
+    axis: sql_retrieval
+    volume:
+      records: "n/a"
+      size_mb: "n/a"
+    refresh:
+      declared: "n/a"
+      interval_seconds: 0
+      observed_last_update: n/a
+      observed_lag_days: 0
+    quality:
+      completeness: 1
+      consistency: 1
+      actuality: 1
+      reliability: 2
+    sensitivity:
+      contains_pii: false
+    lineage:
+      upstream: "n/a"
+      transformations: []
+    decision: exclude
+    notes: >
+      Replaced by fred_economic_data (US Fed decisions/inflation) and
+      banxico_sie (Mexican rate decisions/inflation) — both official, free
+      APIs covering the same economic-calendar need without scraping risk.

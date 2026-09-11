@@ -32,6 +32,7 @@ class Volume(BaseModel):
 
 class Refresh(BaseModel):
     declared: str
+    interval_seconds: int  # machine-readable cadence refresh_worker.py schedules against
     observed_last_update: str
     observed_lag_days: int
 

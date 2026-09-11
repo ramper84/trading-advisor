@@ -21,7 +21,7 @@ dependencies = [
     "jinja2>=3.1",
     "yfinance>=0.2.44",
     "finnhub-python>=2.4.20",
-    "praw>=7.7",
+    "feedparser>=6.0",
     "httpx>=0.27",
     "streamlit>=1.39",
 ]

@@ -12,12 +12,15 @@ the ADRs under §2 and `ARCHITECTURE.md`'s Appendix for the fuller record.
 ## 1. Description
 
 A personal market-analysis and monitoring tool with no execution path of any
-kind. It reads from multiple **configured** market-data sources — some
-structured (quotes/OHLCV), some genuinely unstructured (SEC filings, news,
-Reddit chatter) — persists what it reads, and can produce a plain-language
-analysis grounded in that data on request, always persisted. A monitor list
-drives a trending view and a consolidated dashboard. Which sources are
-active is a config-file decision (`data_catalog.yaml`), not a code change.
+kind, and no social/community feed of any kind — every source is either an
+official/regulatory data provider or a professional newsroom. It reads from
+multiple **configured** market-data sources — structured quotes/OHLCV
+(covering US/global markets and the Bolsa Mexicana de Valores), official
+economic data (Banxico, FRED), and professional news/filings — persists
+what it reads, and can produce a plain-language analysis grounded in that
+data on request, always persisted. A monitor list drives a trending view
+and a consolidated dashboard. Which sources are active is a config-file
+decision (`data_catalog.yaml`), not a code change.
 
 ## 2. Architecture decision
 
@@ -27,11 +30,11 @@ now being in scope:
 | Axis | Outcome | Why |
 |---|---|---|
 | 1 — CAG | **Not selected for v1** | No stable rulebook grounds the analysis (unchanged from the prior architecture). Reserved slot: a personal "how I like analysis framed" doc. |
-| 2 — SQL-retrieval RAG | **Yes — two tables** | `market_observations` (ingested quotes/OHLCV from `yfinance_quotes`/`finnhub_quotes`) and `analyses` (persisted on-demand analyses). Both name their entities exactly (symbol, timestamp) — no embedding needed for either. |
-| 3 — Vector RAG | **Yes — newly activated, plus hybrid** | `sec_edgar_filings`, `finnhub_news`, and `reddit_mentions` are genuinely paraphrastic — "does this article explain today's move" has no exact `WHERE` clause. This reverses the prior architecture's deferral, which held only because no real text corpus existed yet. **Hybrid search (semantic + lexical, `articles/s10-03`) is adopted from Phase 10, not deferred**: this domain is unusually identifier-heavy (tickers, filing Item numbers, exact dollar figures) — precisely the case `s10-03` names as lexical search's clear win over pure embeddings. **Multi-index/routing (`s10-05`) resolved to one table, not several**: the three unstructured sources' metadata is close enough (symbol, published_at, a `source_name` discriminator) and `/analyze` always wants all three together — `s10-05`'s own decision rule ("diverging schemas → separate tables; variations of one thing → a discriminator column") points at the single `document_chunks` table already planned. **Query expansion/decomposition (`s10-04`) is explicitly not applied**: `/analyze`'s query is one ticker, not a rambling multi-topic transcript — `s10-04`'s own guidance is that a short, single-topic query needs neither technique. |
-| 4 — Agentic (Critic) | **No — a plain output guardrail, now a real confidence gate** | No execution to gate, so no Actor-Critic loop — but `articles/s11-03`/`s11-04` still apply as deterministic code: `analysis_guard.py` computes a `confidence` score and a `quality_status` (`grounded`/`degraded`/`insufficient`) from cheap checks run in order — citation integrity (every cited chunk id was actually retrieved, `s11-03`), numeric grounding (cited price/indicator figures fall within the retrieved range — interpolation allowed, extrapolation flagged, `s11-04`'s `numeric_grounding`), and the reliability-tier rule (a `BULLISH`/`BEARISH` stance needs ≥1 citation with `reliability_tier>=3` — `reddit_mentions` alone never clears `s06-02`'s `is_rag_ready` bar). `insufficient` **forces `stance=NEUTRAL`** as an enforced invariant, not a convention (`s11-04`'s abstention discipline) — this is the "does it pass for this session" gate. A model-based semantic judge (`s11-04`'s second layer) is a reserved, config-gated addition (`SEMANTIC_JUDGE_ENABLED`, default off) — added only if the cheap checks prove insufficient, never as day-one scaffolding. |
+| 2 — SQL-retrieval RAG | **Yes — three tables** | `market_observations` (ingested quotes/OHLCV from `yfinance_quotes`/`finnhub_quotes`), `economic_indicators` (official macro series from `banxico_sie`/`fred_economic_data` — **new, ADR-006**), and `analyses` (persisted on-demand analyses). All three name their entities exactly (symbol-or-series-id, timestamp) — no embedding needed for any. `economic_indicators` is its own table, not folded into `market_observations`, per `s10-05`'s schema-divergence rule: a price tick is symbol-keyed, a macro series (Banxico's overnight rate, US CPI) is economy-wide — different entities, not variations of one thing. |
+| 3 — Vector RAG | **Yes — newly activated, plus hybrid** | `sec_edgar_filings`, `finnhub_news`, `yfinance_news`, `elfinanciero_news`, and `el_economista_news` are genuinely paraphrastic — "does this article explain today's move" has no exact `WHERE` clause. This reverses the prior architecture's deferral, which held only because no real text corpus existed yet. **Hybrid search (semantic + lexical, `articles/s10-03`) is adopted from Phase 10, not deferred**: this domain is unusually identifier-heavy (tickers, filing Item numbers, exact dollar figures) — precisely the case `s10-03` names as lexical search's clear win over pure embeddings. **Multi-index/routing (`s10-05`) resolved to one table, not several**: the five unstructured sources' metadata is close enough (symbol, published_at, a `source_name` discriminator) and `/analyze` always wants all of them together — `s10-05`'s own decision rule ("diverging schemas → separate tables; variations of one thing → a discriminator column") points at the single `document_chunks` table already planned. **Query expansion/decomposition (`s10-04`) is explicitly not applied**: `/analyze`'s query is one ticker, not a rambling multi-topic transcript — `s10-04`'s own guidance is that a short, single-topic query needs neither technique. |
+| 4 — Agentic (Critic) | **No — a plain output guardrail, now a real confidence gate** | No execution to gate, so no Actor-Critic loop — but `articles/s11-03`/`s11-04` still apply as deterministic code: `analysis_guard.py` computes a `confidence` score and a `quality_status` (`grounded`/`degraded`/`insufficient`) from cheap checks run in order — citation integrity (every cited chunk id was actually retrieved, `s11-03`), numeric grounding (cited price/indicator figures fall within the retrieved range — interpolation allowed, extrapolation flagged, `s11-04`'s `numeric_grounding`), and the reliability-tier rule (a `BULLISH`/`BEARISH` stance needs ≥1 citation with `reliability_tier>=3`). **Since ADR-006 dropped `reddit_mentions`, every remaining source now scores `reliability>=4` and clears `s06-02`'s own `is_rag_ready` bar on its own** — the rule currently has nothing to gate against; it's kept as defense-in-depth for any future lower-quality source, not because a current one needs it. `insufficient` **forces `stance=NEUTRAL`** as an enforced invariant, not a convention (`s11-04`'s abstention discipline) — this is the "does it pass for this session" gate. A model-based semantic judge (`s11-04`'s second layer) is a reserved, config-gated addition (`SEMANTIC_JUDGE_ENABLED`, default off) — added only if the cheap checks prove insufficient, never as day-one scaffolding. |
 | 5 — Orchestration | **No** | One generation call per `/analyze` request. Fanning in two retrieval types (SQL + vector) before that call is augmentation (s09-04), not orchestration — nothing routes at runtime. |
-| Live pass-through | **Yes — and scheduled refresh, both, per source** | Structured sources: live-read (cached) for `/symbols/{symbol}/status`, scheduled refresh (1-5 min) for `market_observations`. Unstructured sources: scheduled refresh only, at the cadence `data_catalog.yaml` declares per source (hourly for filings, 30 min for news/Reddit) — there is no "live status" reading for a news article. **Temporal weighting differs by source family (`articles/s10-06`'s domain-transfer note, not its "recency always wins" default)**: `finnhub_news`/`reddit_mentions` genuinely decay (exponential half-life — sentiment ages fast) since they're the "value erodes" case; `sec_edgar_filings` is closer to the "validity flips on a date" case (a 10-Q supersedes the prior quarter's, it doesn't fade beside it) — retrieval prefers the most recent filing per form type rather than smooth-decaying older ones out. |
+| Live pass-through | **Yes — and scheduled refresh, both, per source** | Structured sources: live-read (cached) for `/symbols/{symbol}/status`, scheduled refresh (1-5 min) for `market_observations`; `economic_indicators` is scheduled-refresh only (daily — Banxico/FRED release on their own schedule, never continuously). Unstructured sources: scheduled refresh only, at the cadence `data_catalog.yaml` declares per source (hourly for filings, 30 min for news) — there is no "live status" reading for a news article. **Temporal weighting differs by source family (`articles/s10-06`'s domain-transfer note, not its "recency always wins" default)**: the news sources genuinely decay (exponential half-life — sentiment ages fast) since they're the "value erodes" case; `sec_edgar_filings` is closer to the "validity flips on a date" case (a 10-Q supersedes the prior quarter's, it doesn't fade beside it) — retrieval prefers the most recent filing per form type rather than smooth-decaying older ones out. |
 
 Composition strategy: no conductor. Independent capabilities sharing
 plumbing (`services/market_data.py`, the ingest pipeline, Postgres+pgvector,
@@ -68,8 +71,37 @@ Consequences:
   service. See `ARCHITECTURE.md` ADR-004.
 - pgvector goes from "installed, unused" to **activated**.
 - `TRADINGVIEW_MCP_PATH`/`TV_DEBUG_PORT` env vars are removed; replaced by
-  `FINNHUB_API_KEY`, `REDDIT_CLIENT_ID`/`REDDIT_CLIENT_SECRET`,
-  `EDGAR_USER_AGENT` (§6).
+  `FINNHUB_API_KEY`, `EDGAR_USER_AGENT` (§6).
+
+### ADR — drop Reddit entirely; drop TradingView-as-source; add official economic data + Mexican news (2026-09-10)
+
+Before Phase 9 began, the operator asked to redesign the source list
+around what they actually use day-to-day, with one hard rule: **no
+social/community feed of any kind, ever** — a strengthening from "Reddit
+specifically" to a permanent category exclusion. Full research and the
+resulting catalog entries are in `data_catalog.yaml`; see
+`ARCHITECTURE.md`'s ADR-006 for the complete record. Summary:
+
+- **Dropped**: `reddit_mentions` (gone, not merely excluded-with-a-reason —
+  no social source is even a candidate going forward).
+  `tradingview_community` was considered and excluded-with-a-reason: no
+  public API (same CDP/desktop constraint ADR-004 already removed), and
+  its unique value — community-shared chart analysis — is the same
+  "grain of salt" category Reddit was dropped for. `google_finance` (no
+  API since 2012) and `investing_com_calendar` (no free/official API,
+  confirmed against their own support docs) are also excluded-with-reason.
+- **Added**: `yfinance_news` (Yahoo's own news aggregation, matching the
+  operator's actual habit), `banxico_sie` and `fred_economic_data`
+  (official central-bank economic series, replacing the Investing.com
+  economic-calendar idea with the real official sources for the same
+  data), `elfinanciero_news` and `el_economista_news` (both confirmed-live
+  Mexican financial news RSS feeds).
+- **Kept**: `yfinance_quotes` (confirmed to cover BMV via `.MX` tickers —
+  this is what actually solves the Mexican-market-coverage need, not
+  TradingView), `finnhub_quotes`/`finnhub_news` (kept as vendor redundancy
+  per the operator's explicit choice, even though not in their original
+  day-to-day list), `sec_edgar_filings` (unchanged, still the strongest
+  single source for US-listed companies).
 
 ## 3. Project tier and structure
 
@@ -79,7 +111,7 @@ composed architectures needing a conductor.
 
 ```
 trading-advisor/
-├── data_catalog.yaml               # the 5 configured sources (articles/s06-02)
+├── data_catalog.yaml               # the 9 configured sources + 3 excluded-with-reason (articles/s06-02, ADR-006)
 ├── app/
 │   ├── config.py
 │   ├── schemas.py
@@ -97,16 +129,18 @@ trading-advisor/
 │   │   ├── parsers/
 │   │   │   ├── quotes_parser.py     # yfinance/finnhub JSON -> intermediate records
 │   │   │   ├── edgar_parser.py      # SEC filing HTML -> section-split text
-│   │   │   ├── news_parser.py       # Finnhub news JSON -> article records
-│   │   │   └── reddit_parser.py     # Reddit JSON -> post/comment records, min-score filtered
+│   │   │   ├── news_parser.py       # Finnhub + yfinance news JSON -> shared RawArticle records
+│   │   │   ├── rss_parser.py        # elfinanciero_news + el_economista_news RSS -> RawArticle, keyword-filtered (ADR-006)
+│   │   │   └── economic_data_parser.py  # banxico_sie + fred_economic_data JSON -> RawEconomicObservation (ADR-006)
 │   │   ├── normalizers/
-│   │   │   └── canonical.py         # -> Document(content, metadata), articles/s06-03's contract
-│   │   ├── chunking.py              # structural-by-Item for filings (built, Phase 3-4), one-chunk-per-item for news/Reddit
+│   │   │   └── canonical.py         # -> Document(content, metadata), articles/s06-03's contract — news/filing sources only, economic_data_parser feeds SQL directly
+│   │   ├── chunking.py              # structural-by-Item for filings (built, Phase 3-4), one-chunk-per-item for news
 │   │   ├── embedding.py             # text-embedding-3-small, writes document_chunks with embedding_version + source_hash (s11-05)
 │   │   ├── refresh_worker.py        # scheduled loop, per-source cadence from data_catalog.yaml
-│   │   └── observation_store.py     # Axis 2 write side, market_observations
+│   │   ├── observation_store.py     # Axis 2 write side, market_observations
+│   │   └── economic_indicator_store.py  # Axis 2 write side, economic_indicators (Phase 9, ADR-006)
 │   ├── retrieval/                   # ONLINE pipeline
-│   │   ├── sql_retriever.py         # Axis 2 typed reads: observations, analyses, monitored_symbols
+│   │   ├── sql_retriever.py         # Axis 2 typed reads: observations, economic_indicators, analyses, monitored_symbols
 │   │   ├── vector_retriever.py      # Axis 3: hard filter (symbol) -> semantic + lexical search -> RRF fusion -> temporal soft-weight -> threshold/soft-fail
 │   │   ├── hybrid_search.py         # tsvector/GIN lexical branch + RRF fusion with the semantic branch (s10-03)
 │   │   └── temporal.py              # per-source-family decay/recency weighting (s10-06), applied last, over the survivors only
@@ -120,7 +154,7 @@ trading-advisor/
 │       ├── symbols.py               # GET /symbols/{symbol}/status, GET /symbols/{symbol}/analyses
 │       ├── analyze.py               # POST /analyze
 │       └── monitor.py               # GET/POST /monitor, DELETE /monitor/{symbol}
-├── migrations/                      # Alembic; market_observations, analyses, monitored_symbols, document_chunks
+├── migrations/                      # Alembic; market_observations, economic_indicators, analyses, monitored_symbols, document_chunks
 ├── evals/
 │   ├── golden_queries.json          # seeded from README.md §2a; must include an abstention case AND a contradiction case (s11-06)
 │   └── measure_retrieval.py         # artisanal precision@k harness (s10-02) — decides IF/WHEN reranking (Phase 16) earns its place
@@ -144,16 +178,17 @@ above) — no host-native deployment wrinkle this time.
 | Validation | Pydantic v2 | `PLAYBOOK.md` §4 default |
 | Store | PostgreSQL 16 (`pgvector/pgvector:pg16`) | Axis 2's three tables + Axis 3's `document_chunks` — pgvector is now **activated**, not installed-unused |
 | Cache | Redis | freshness-budget cache for live quote reads |
-| Structured market data | `yfinance` (primary), `finnhub` (fallback) | Axis 2; both free/free-tier, no brokerage account |
-| Unstructured market data | SEC EDGAR full-text search, Finnhub `/company-news`, Reddit via PRAW | Axis 3; see `data_catalog.yaml` for cadence/quality per source |
+| Structured market data | `yfinance` (primary, covers BMV via `.MX`), `finnhub` (fallback) | Axis 2; both free/free-tier, no brokerage account |
+| Economic data | Banxico SIE (Mexico), FRED (US) | Axis 2; both free, official, token/key registration required — ADR-006, replacing the Investing.com economic-calendar idea |
+| Unstructured market data | SEC EDGAR full-text search, Finnhub `/company-news`, Yahoo Finance news (`yfinance`), El Financiero + El Economista RSS (`feedparser`) | Axis 3; see `data_catalog.yaml` for cadence/quality per source. No social/community source of any kind (ADR-006) |
 | Embedding model | `text-embedding-3-small` | `PLAYBOOK.md` §4/Axis 3 default; upgrade only against a measured recall gap |
-| Chunking | Structural (by filing Item) for `sec_edgar_filings`; one chunk per item for `finnhub_news`/`reddit_mentions` (already short-form) | `articles/s07-03`/`s07-04`'s per-document-type rule — recursive chunking is overkill for a 2-paragraph news summary |
+| Chunking | Structural (by filing Item) for `sec_edgar_filings`; one chunk per item for the news sources (already short-form) | `articles/s07-03`/`s07-04`'s per-document-type rule — recursive chunking is overkill for a 2-paragraph news summary |
 | Vector index | **None in v1** — sequential scan | Axis 3 default; add `hnsw` only against a measured latency number |
 | LLM access | LiteLLM + Instructor, `gpt-4o-mini` primary / a Claude Haiku fallback | `PLAYBOOK.md` §4 default |
 | Prompts | Jinja2, versioned (`prompts/analyze/v1/`) | standard convention |
 | Structured output | Instructor | `stance` (`BULLISH`/`BEARISH`/`NEUTRAL`) + confidence + rationale + per-claim citations, validated schema |
 | Frontend | Streamlit | trending list, symbol detail, analyze form, dashboard |
-| Local deployment | `docker compose`: postgres, redis, api, streamlit, **refresh_worker** | All five sources are plain HTTPS APIs — no host-native deployment constraint this time (contrast the retired TradingView-only architecture) |
+| Local deployment | `docker compose`: postgres, redis, api, streamlit, **refresh_worker** | All nine sources are plain HTTPS APIs — no host-native deployment constraint this time (contrast the retired TradingView-only architecture) |
 
 ## 5. Common commands
 
@@ -171,9 +206,10 @@ FINNHUB_API_KEY=                          # backs finnhub_quotes AND finnhub_new
 
 # Unstructured sources
 EDGAR_USER_AGENT="your-name your-email@example.com"   # SEC's fair-access policy requires this
-REDDIT_CLIENT_ID=
-REDDIT_CLIENT_SECRET=
-REDDIT_USER_AGENT="trading-advisor/0.1 by u/your-username"
+
+# Economic data (Axis 2, economic_indicators table — ADR-006)
+BANXICO_SIE_TOKEN=                        # free token: https://www.banxico.org.mx/SieAPIRest/service/v1/token
+FRED_API_KEY=                             # free key: https://fredaccount.stlouisfed.org
 
 # LLM + embeddings
 OPENAI_API_KEY=                           # gpt-4o-mini generation AND text-embedding-3-small
@@ -191,11 +227,10 @@ VECTOR_TOP_K=8
 VECTOR_DISTANCE_THRESHOLD=0.35
 HYBRID_SEARCH_ENABLED=true          # semantic + lexical, RRF-fused (s10-03) — a switchable boolean per s10-01's "measurable experiment" discipline
 RERANK_ENABLED=false                # reserved (s10-01) — flip on only once evals/measure_retrieval.py shows a ranking gap
-TEMPORAL_HALF_LIFE_DAYS_NEWS=14     # finnhub_news decay (s10-06) — sentiment ages fast
-TEMPORAL_HALF_LIFE_DAYS_REDDIT=7    # reddit_mentions decay — noisier and faster-moving still
+TEMPORAL_HALF_LIFE_DAYS_NEWS=14     # all five news sources' decay (s10-06) — sentiment ages fast
 
 # Quality gate (s11-03/s11-04) — the "did this pass for this session" check
-SEMANTIC_JUDGE_ENABLED=false        # reserved: a second, cheaper model verifying claims against sources — add only if numeric grounding + citation integrity prove insufficient             # soft-fail below this — return low_confidence, not a forced answer
+SEMANTIC_JUDGE_ENABLED=false        # reserved: a second, cheaper model verifying claims against sources — add only if numeric grounding + citation integrity prove insufficient
 ```
 
 ## 7. Build strategy
@@ -211,24 +246,32 @@ phases the prior architecture skipped:
    were decided in conversation first); finalize README §2a's queries into
    `evals/golden_queries.json`, including at least one query only Axis 3
    can answer (e.g. "why did NVDA move today").
-3. **Phase 3-4 — done.** One parser per source format (`quotes_parser.py`,
-   `edgar_parser.py`, `news_parser.py`, `reddit_parser.py`), converging on
-   canonical `Document` via `normalizers/canonical.py` (`articles/s06-03`);
-   `reddit_parser.py` applies the minimum-score filter named in the catalog
-   *before* normalization, not after — the filter is the cleaning layer,
-   not a retrieval-time patch (`articles/s06-04`'s "one auditable layer"
-   rule). `edgar_parser.py`'s structural section-split (by filing Item) is
-   also this source's Phase 7 chunking boundary, built now since the
-   splitting logic and the parsing logic are the same regex pass. 19 tests,
-   all passing, no network calls — parsers operate on already-fetched
-   payloads; the `fetch_*` functions calling the real APIs are untested
-   until real credentials exist.
-4. **Phase 5 — PII: skipped, with a stated reason.** All five sources are
-   public market/company/social data about tickers, not personal data
-   about identifiable individuals in the GDPR sense — even Reddit usernames
-   are already pseudonymous public content. Revisit if a future source ever
-   carries real personal data (e.g. a source containing named private
-   individuals).
+3. **Phase 3-4 — done, extended 2026-09-10 for the redesigned source list
+   (ADR-006).** One parser per source format: `quotes_parser.py`,
+   `edgar_parser.py`, `news_parser.py` (now shared by `finnhub_news` and
+   `yfinance_news`, converging on one `RawArticle` shape),
+   `rss_parser.py` (new — `elfinanciero_news`/`el_economista_news`, keyword-
+   filtered since RSS has no per-symbol query, verified live against both
+   real feeds the same day), `economic_data_parser.py` (new —
+   `banxico_sie`/`fred_economic_data`, each source's own disguised-null
+   marker handled explicitly: Banxico's `"N/E"`, FRED's `"."`). All
+   news/filing parsers converge on canonical `Document` via
+   `normalizers/canonical.py` (`articles/s06-03`); `economic_data_parser.py`
+   feeds SQL directly (Axis 2), never `Document`/embedding — there's
+   nothing paraphrastic in a rate value. `edgar_parser.py`'s structural
+   section-split (by filing Item) is also this source's Phase 7 chunking
+   boundary. `reddit_parser.py` is deleted, not archived — ADR-006 dropped
+   the source entirely. 31 tests, all passing, no network calls — parsers
+   operate on already-fetched payloads (the `yfinance_news`/RSS fixtures
+   were captured from real live calls, not invented); the `fetch_*`
+   functions calling the real APIs are untested until real credentials
+   exist for Finnhub/Banxico/FRED (`yfinance` and the two RSS feeds need
+   no credentials and were verified live during this redesign).
+4. **Phase 5 — PII: skipped, with a stated reason.** All nine sources are
+   public market/company data about tickers or official economic series,
+   not personal data about identifiable individuals in the GDPR sense.
+   Revisit if a future source ever carries real personal data (e.g. a
+   source containing named private individuals).
 5. **Phase 6 — CAG: skipped**, unchanged from the prior architecture, no
    rulebook exists.
 6. **Phase 7 — Chunking — done in Phase 3-4.** Structural (by filing Item,
@@ -254,13 +297,19 @@ phases the prior architecture skipped:
    applied against a real `pgvector/pgvector:pg16` container, a chunk
    round-tripped through insert → lexical (`tsvector`) match → vector
    cosine distance, then cleaned up.
-8. **Phase 9 — Freshness, per source**: `refresh_worker.py` reads each
+8. **Phase 9 — Freshness, per source — next up.** Three migrations still
+   needed (`market_observations`, `economic_indicators`, `monitored_symbols`
+   — `document_chunks` already exists from Phase 8) plus
+   `economic_indicator_store.py` (Axis 2 write side, mirroring
+   `observation_store.py`). `refresh_worker.py` reads each
    `data_catalog.yaml` source's own `refresh.declared` cadence (1-5 min for
-   quotes, hourly for filings, 30 min for news/Reddit) — one worker, one
-   catalog-driven schedule. Incremental reindexing uses `source_hash` to
-   skip unchanged documents (`s11-05`'s `is_stale` pattern) — a filing
-   correction re-embeds only that filing, never the whole corpus. The
-   live-read path (`FRESHNESS_BUDGET_SECONDS`) stays structured-sources-only.
+   quotes, daily for economic data, hourly for filings, 30 min for the five
+   news sources) — one worker, one catalog-driven schedule, dispatching to
+   the right parser per `source.name`. Incremental reindexing uses
+   `source_hash` to skip unchanged documents (`s11-05`'s `is_stale`
+   pattern) — a filing correction re-embeds only that filing, never the
+   whole corpus. The live-read path (`FRESHNESS_BUDGET_SECONDS`) stays
+   structured-sources-only.
 9. **Phase 10 — Retrieval**: `sql_retriever.py` (Axis 2, typed) and
    `vector_retriever.py` (Axis 3), assembled in `s10-06`'s stated order —
    *cheap and excluding first, expensive and fine last, soft at the close*:

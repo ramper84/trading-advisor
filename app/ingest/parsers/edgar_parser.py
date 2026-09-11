@@ -82,9 +82,13 @@ def fetch_recent_filings(
     return filings
 
 
-def fetch_filing_document(cik: str, accession_number: str, primary_document: str, user_agent: str) -> str:
+def filing_document_url(cik: str, accession_number: str, primary_document: str) -> str:
     accession_nodash = accession_number.replace("-", "")
-    url = FILING_DOCUMENT_URL.format(cik=cik, accession_nodash=accession_nodash, primary_doc=primary_document)
+    return FILING_DOCUMENT_URL.format(cik=cik, accession_nodash=accession_nodash, primary_doc=primary_document)
+
+
+def fetch_filing_document(cik: str, accession_number: str, primary_document: str, user_agent: str) -> str:
+    url = filing_document_url(cik, accession_number, primary_document)
     return fetch_text(url, headers={"User-Agent": user_agent})
 
 

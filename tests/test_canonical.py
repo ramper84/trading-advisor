@@ -2,14 +2,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from app.ingest.catalog import load_catalog
-from app.ingest.normalizers.canonical import (
-    from_article,
-    from_filing_section,
-    from_reddit_post,
-)
+from app.ingest.normalizers.canonical import from_article, from_filing_section
 from app.ingest.parsers.edgar_parser import RawFilingSection
 from app.ingest.parsers.news_parser import RawArticle
-from app.ingest.parsers.reddit_parser import RawRedditPost
 
 CATALOG_PATH = Path(__file__).resolve().parent.parent / "data_catalog.yaml"
 
@@ -60,21 +55,21 @@ def test_from_article_combines_headline_and_summary():
     assert doc.metadata.extra["outlet"] == "Example Wire"
 
 
-def test_from_reddit_post_carries_low_reliability_tier():
-    source = _catalog().get("reddit_mentions")
-    post = RawRedditPost(
-        symbol="ACME",
-        post_id="abc123",
-        subreddit="wallstreetbets",
-        title="ACME to the moon",
-        body="Loaded up on calls.",
-        score=250,
-        url="https://reddit.com/r/wallstreetbets/comments/abc123",
-        created_at=datetime(2026, 8, 1, tzinfo=timezone.utc),
+def test_from_article_works_for_yfinance_news_too():
+    """from_article is shared by finnhub_news and yfinance_news (ADR-006) —
+    only the catalog_source passed in tells them apart."""
+    source = _catalog().get("yfinance_news")
+    article = RawArticle(
+        symbol="WALMEX.MX",
+        article_id="yf-1",
+        headline="Walmex reports quarterly results",
+        summary="Same-store sales grew year over year.",
+        url="https://finance.yahoo.com/example",
+        published_at=datetime(2026, 9, 1, tzinfo=timezone.utc),
+        source="Yahoo Finance",
     )
 
-    doc = from_reddit_post(post, source)
+    doc = from_article(article, source)
 
-    assert doc.metadata.reliability_tier < 3  # the point of ADR-004's rule
-    assert doc.metadata.extra["subreddit"] == "wallstreetbets"
-    assert doc.metadata.extra["score"] == 250
+    assert doc.metadata.source_name == "yfinance_news"
+    assert doc.metadata.reliability_tier == source.reliability_tier

@@ -12,11 +12,12 @@ class Settings(BaseSettings):
     # Structured sources (data_catalog.yaml: yfinance_quotes, finnhub_quotes)
     finnhub_api_key: str | None = None
 
-    # Unstructured sources (data_catalog.yaml: sec_edgar_filings, finnhub_news, reddit_mentions)
+    # Unstructured sources (data_catalog.yaml: sec_edgar_filings, finnhub_news, yfinance_news, elfinanciero_news)
     edgar_user_agent: str | None = None
-    reddit_client_id: str | None = None
-    reddit_client_secret: str | None = None
-    reddit_user_agent: str = "trading-advisor/0.1"
+
+    # Economic data (data_catalog.yaml: banxico_sie, fred_economic_data — ADR-006)
+    banxico_sie_token: str | None = None
+    fred_api_key: str | None = None
 
     # LLM + embeddings
     openai_api_key: str | None = None
@@ -32,6 +33,12 @@ class Settings(BaseSettings):
     # Vector retrieval (Axis 3)
     vector_top_k: int = 8
     vector_distance_threshold: float = 0.35
+    hybrid_search_enabled: bool = True
+    rerank_enabled: bool = False
+    temporal_half_life_days_news: int = 14
+
+    # Quality gate (s11-03/s11-04)
+    semantic_judge_enabled: bool = False
 
 
 @lru_cache

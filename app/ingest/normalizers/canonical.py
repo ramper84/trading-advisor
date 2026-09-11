@@ -12,7 +12,6 @@ from app.ingest.catalog import CatalogSource
 from app.ingest.document import Document, DocumentMetadata
 from app.ingest.parsers.edgar_parser import RawFilingSection
 from app.ingest.parsers.news_parser import RawArticle
-from app.ingest.parsers.reddit_parser import RawRedditPost
 
 
 def from_filing_section(section: RawFilingSection, catalog_source: CatalogSource) -> Document:
@@ -33,6 +32,9 @@ def from_filing_section(section: RawFilingSection, catalog_source: CatalogSource
 
 
 def from_article(article: RawArticle, catalog_source: CatalogSource) -> Document:
+    """Shared by finnhub_news and yfinance_news — both parsers converge on
+    the same RawArticle shape, so one normalizer covers either source; only
+    catalog_source (passed by the caller) tells them apart."""
     return Document(
         content=f"{article.headline}\n\n{article.summary}",
         metadata=DocumentMetadata(
@@ -44,21 +46,5 @@ def from_article(article: RawArticle, catalog_source: CatalogSource) -> Document
             published_at=article.published_at,
             url=article.url,
             extra={"outlet": article.source},
-        ),
-    )
-
-
-def from_reddit_post(post: RawRedditPost, catalog_source: CatalogSource) -> Document:
-    return Document(
-        content=f"{post.title}\n\n{post.body}".strip(),
-        metadata=DocumentMetadata(
-            source_name=catalog_source.name,
-            symbol=post.symbol,
-            reliability_tier=catalog_source.reliability_tier,
-            ingested_at=datetime.now(timezone.utc),
-            document_id=post.post_id,
-            published_at=post.created_at,
-            url=post.url,
-            extra={"subreddit": post.subreddit, "score": post.score},
         ),
     )
