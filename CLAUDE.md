@@ -584,6 +584,86 @@ phases the prior architecture skipped:
     reasons over that precomputed signal rather than inventing it, producing
     `stance`/confidence/rationale/citations with `chunk_id`s from the actual
     retrieved set (`s11-03`).
+
+    **Done (2026-09-10).** `app/analysis/synthesis.py`: the deterministic
+    stage. `s11-02`'s reference domain has a natural per-source number to
+    synthesize (budget hours, written in the source text); this project's
+    citations don't, and ADR-007 already ruled out adding one via a
+    per-article LLM call. `_keyword_lean` fills that gap the way `s11-02`
+    fills its own — a cheap, deterministic bullish/bearish lexicon lookup
+    in [-1, 1], not a model call, so it doesn't reopen ADR-007's decision.
+    Its accuracy is a named, expected limitation (see below), not assumed.
+    `combined_weight` uses exactly the three named signals — `fusion_rank`
+    (0.40), `temporal_weight` (0.35), `reliability_tier` (0.25, weighted
+    least since every currently-included source already clears ADR-006's
+    quality floor). `fusion_rank` required a small Phase 10 contract
+    extension: `RetrievalResult` now also carries `fused_rank`, captured
+    **before** temporal re-sorting — using the final post-temporal order
+    would have double-counted temporal effects into what's supposed to be
+    an independent signal. `aggregate_evidence` implements the *corrected*
+    version of `s11-02`'s own contradiction logic (the handbook's own
+    editor's note flags the bug in the original): `strong_low`/
+    `strong_high`/`contested` are computed over STRONG citations
+    (`weight >= 0.4`) only, never the full set. `contested` itself uses an
+    absolute sign-disagreement threshold (`CONTESTED_LEAN_THRESHOLD=0.3`
+    on each side of zero), not `s11-02`'s relative-spread formula — leans
+    are zero-centered and bounded `[-1, 1]`, unlike always-positive hours,
+    so a relative spread degenerates near an anchor close to zero, which
+    is the common case here.
+
+    `app/services/llm_service.py`: the judgment stage. `instructor.from_litellm(litellm.completion)`,
+    `gpt-4o-mini` primary, `claude-haiku-4-5-20251001` fallback on any
+    exception from the primary call — not tried speculatively. Real
+    Jinja2 templates now fill `prompts/analyze/v1/{system,user}.j2`
+    (previously placeholder stubs): the system prompt instructs
+    BULLISH/BEARISH/NEUTRAL only (never BUY/SELL/HOLD, ADR-002), citing
+    only provided `chunk_id`s, explaining rather than flattening a
+    `contested` signal, and preferring NEUTRAL over a confident guess on
+    thin evidence. `AnalysisSynthesis`/`Citation` (in `app/schemas.py`)
+    are the Instructor response models — `stance`/`confidence`/
+    `rationale`/`citations`, exactly CLAUDE.md §4's stated shape; the
+    model's own `confidence` is explicitly documented as distinct from
+    Phase 13's code-derived one, never conflated. 18 new tests (all
+    mocking the LLM client — no real network calls in the unit suite);
+    137 passing total.
+
+    **No router or persistence built yet**: `POST /analyze` and the
+    `analyses` table both wait for Phase 13's confidence gate, which is
+    what actually computes the `quality_status` a persisted row needs —
+    persisting a row with an undefined quality status would be a
+    half-built feature, not this phase's deliverable.
+
+    **Live verification (2026-09-10)**, same temporary-dev-Postgres
+    discipline as Phases 9-11 (`fantasy-postgres-1` confirmed healthy
+    throughout and after teardown), plus this phase's first **real**
+    generation calls: the full Phase 10-12 pipeline run end to end against
+    real `AAPL` data — retrieval, augmentation, the deterministic
+    aggregate, then a genuine `gpt-4o-mini` call. Output: `stance=NEUTRAL`,
+    a rationale correctly explaining the `contested=True` evidence
+    (conflicting SEC filing risk-factor language) rather than averaging
+    past it, citing two real `chunk_id`s independently confirmed present
+    in the actual retrieved set — no hallucinated citation, though nothing
+    code-enforces that yet (Phase 13's job). The fallback path was also
+    live-verified for real, twice: once as a raw `litellm.completion` call
+    confirming the model string itself resolves (a real risk — `litellm`'s
+    model registry could plausibly lag a model's release), and once
+    through the full `generate_synthesis()` integration with a
+    deliberately invalid primary key (never a real one), confirming
+    Instructor's retry/fallback machinery — not just bare `litellm` — also
+    completes successfully end to end.
+
+    One real, expected limitation surfaced and is recorded rather than
+    silently patched: `_keyword_lean` saturated at exactly ±1.0 for every
+    citation in the real run, with none landing near zero — SEC filing
+    "Risk Factors" section headers are keyword-dense in one direction
+    (mostly the word "risk" itself) regardless of whether they disclose
+    anything new, so `contested=True` fires often whenever both a
+    filing chunk and a bullish news chunk are retrieved together. This is
+    exactly `_keyword_lean`'s own documented, named trade-off (a
+    word-matching heuristic, not measured accuracy) — not a bug to fix
+    now; `evals/measure_retrieval.py` (Phase 17) is the tool that decides
+    whether this actually costs real answer quality, per `s11-02`'s own
+    "measure it before assuming" discipline.
 12. **Phase 13 — Guardrails, the confidence gate**: `analysis_guard.py`
     runs cheap-to-expensive, per `s11-04`'s verification funnel —
     (1) **citation integrity**, checked in code, never trusted to the

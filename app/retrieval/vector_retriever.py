@@ -35,6 +35,12 @@ class RetrievalResult:
     candidates: list[ChunkCandidate] = field(default_factory=list)
     scores: dict[int, float] = field(default_factory=dict)
     best_distance: Optional[float] = None
+    # 1-indexed rank in the RRF-fused list, captured BEFORE temporal
+    # weighting re-sorts it (Phase 12, ADR-010). `scores` is already
+    # fused-then-temporally-weighted — using its resulting order as a
+    # "fusion rank" signal would double-count temporal effects into what
+    # Phase 12's weighting formula treats as an independent input.
+    fused_rank: dict[int, int] = field(default_factory=dict)
 
 
 def semantic_search(
@@ -89,6 +95,7 @@ def retrieve(
         ranked_lists.append(lexical_hits)
 
     fused = reciprocal_rank_fusion(ranked_lists)
+    fused_rank = {candidate.chunk_id: rank for rank, (candidate, _) in enumerate(fused, start=1)}
     weighted = apply_temporal_weighting(fused, settings.temporal_half_life_days_news, now=now)
 
     # Soft-fail (s09-03): nothing clears the distance threshold means
@@ -102,4 +109,5 @@ def retrieve(
         candidates=[candidate for candidate, _ in weighted],
         scores={candidate.chunk_id: score for candidate, score in weighted},
         best_distance=best_distance,
+        fused_rank=fused_rank,
     )

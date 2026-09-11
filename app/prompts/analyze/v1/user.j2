@@ -1,3 +1,13 @@
-{# Phase 11-12 fills this in: assembles recent market_observations, past
-   analyses, and top-k retrieved chunks (XML-delimited, per articles/s09-04)
-   into the user turn. #}
+Symbol: {{ symbol }}
+Query: {{ query }}
+
+Precomputed evidence signal (arithmetic, computed in code — reason over it, do not invent your own):
+- anchor_lean: {{ aggregate.anchor_lean }}
+- strong_low: {{ aggregate.strong_low }}
+- strong_high: {{ aggregate.strong_high }}
+- contested: {{ aggregate.contested }}
+- low_confidence: {{ low_confidence }}
+
+Retrieved context:
+
+{{ context }}

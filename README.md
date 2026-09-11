@@ -181,6 +181,20 @@ on a locally-run TradingView Desktop app. Both are gone, not paused — see
       chunks, not just a synthetic fixture. No router yet — `POST
       /analyze` isn't a coherent endpoint until Phase 12 (generation) and
       Phase 13 (the confidence gate) exist behind it.
-- [ ] Phase 12 (generation: two-stage synthesis — a deterministic
-      precomputed signal, then one Instructor-validated generation call)
-      — next up
+- [x] Phase 12 — generation: `app/analysis/synthesis.py` computes a
+      deterministic per-citation weight (fusion rank + temporal weight +
+      reliability tier) and a weighted-median lean anchor with a corrected
+      `contested` flag (strong citations only — a lone weak outlier can't
+      manufacture a contradiction); `app/services/llm_service.py` makes
+      the one generation call (`gpt-4o-mini` primary, Claude Haiku 4.5
+      fallback) that reasons over it. 137 tests passing. Verified live
+      with real `AAPL` data and **real LLM calls**: a genuine `gpt-4o-mini`
+      run produced a correct `NEUTRAL` stance explaining a real contested
+      signal, citing two chunk_ids independently confirmed present in the
+      real retrieved set; the fallback path was live-verified twice,
+      including through a forced-failure run of the real Instructor
+      integration. No router or `analyses`-table persistence yet — Phase
+      13's confidence gate is what computes the `quality_status` a
+      persisted row needs.
+- [ ] Phase 13 (guardrails — the confidence gate: citation integrity,
+      numeric grounding, the reliability-tier rule) — next up

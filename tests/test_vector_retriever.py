@@ -110,3 +110,37 @@ def test_retrieve_low_confidence_when_nothing_retrieved(mock_semantic, mock_embe
     assert result.low_confidence is True
     assert result.best_distance is None
     assert result.candidates == []
+
+
+@patch("app.retrieval.vector_retriever.get_settings")
+@patch("app.retrieval.vector_retriever.embed_texts")
+@patch("app.retrieval.vector_retriever.lexical_search")
+@patch("app.retrieval.vector_retriever.semantic_search")
+def test_retrieve_fused_rank_reflects_pre_temporal_order(mock_semantic, mock_lexical, mock_embed, mock_settings):
+    """Regression guard (Phase 12): fused_rank must capture RRF order
+    BEFORE temporal weighting re-sorts, so it stays an independent signal
+    rather than double-counting temporal effects."""
+    from app.retrieval.hybrid_search import ChunkCandidate
+
+    mock_settings.return_value = Settings(vector_top_k=8, vector_distance_threshold=0.35, hybrid_search_enabled=True)
+    mock_embed.return_value = [[0.1] * 1536]
+
+    old_but_semantically_best = ChunkCandidate(
+        1, "finnhub_news", "AAPL", "doc-1", 4, "content",
+        NOW - timedelta(days=365), None, None, {},
+    )
+    fresh_but_semantically_worst = ChunkCandidate(
+        2, "finnhub_news", "AAPL", "doc-2", 4, "content",
+        NOW, None, None, {},
+    )
+    mock_semantic.return_value = [(old_but_semantically_best, 0.1), (fresh_but_semantically_worst, 0.2)]
+    mock_lexical.return_value = [old_but_semantically_best, fresh_but_semantically_worst]
+
+    result = retrieve("AAPL", "why did AAPL move", conn=MagicMock(), now=NOW)
+
+    # Temporal weighting should push the fresh candidate to rank 1 in
+    # final candidates/scores, but fused_rank must still show the
+    # semantically-best (old) one as rank 1 — the pre-temporal order.
+    assert result.fused_rank[1] == 1
+    assert result.fused_rank[2] == 2
+    assert result.candidates[0].chunk_id == 2

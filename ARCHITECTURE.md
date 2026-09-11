@@ -152,6 +152,8 @@ app/
 │                     technical_indicators.py — RSI + volatility from daily_bars, NO LLM import (ADR-007)
 │                     augmentation.py — assembles SQL + vector retrieval into one XML context,
 │                              pure function, NO LLM import, NO DB access (Phase 11, ADR-009)
+│                     synthesis.py — deterministic per-citation weight + weighted-median anchor +
+│                              contested flag, pure function, NO LLM import (Phase 12, ADR-010)
 │                     analysis_store.py — Axis 2, analyses + monitored_symbols
 ├── prompts/         analyze/v1/{system,user}.j2
 └── routers/         trending.py, symbols.py, analyze.py, monitor.py — thin HTTP only
@@ -170,7 +172,7 @@ request; `retrieval/` never touches a network source directly.
 | `services/run_recorder.py` | `config` | everything else — pure observability plumbing, importable by `ingest/*`, `retrieval/*`, and `routers/*` alike |
 | `services/db.py` | `config` | everything else — the one shared Postgres connection helper (registers the pgvector adapter), importable by `ingest/*`, `retrieval/*`, and `analysis/*` alike |
 | `services/market_data.py` | `config`, `schemas` | `routers`, `analysis`, `guardrails` |
-| `services/llm_service.py` | `config`, `schemas`, `prompts` | `routers` |
+| `services/llm_service.py` | `config`, `schemas`, `prompts`, `analysis/synthesis.py` (the `EvidenceAggregate` it reasons over) | `routers` |
 | `guardrails/*` | `config`, `schemas` | `routers` |
 | `ingest/*` | `config`, `schemas`, `services/market_data.py`, `services/db.py` | `routers`, `guardrails`, `retrieval/*` |
 | `retrieval/vector_retriever.py` | `config`, `schemas`, `retrieval/hybrid_search.py`, `retrieval/temporal.py` | `ingest/*` (reads what ingest already wrote, never triggers a fetch), `routers` |
@@ -178,6 +180,7 @@ request; `retrieval/` never touches a network source directly.
 | `retrieval/sql_retriever.py` | `config`, `schemas` | `ingest/*`, `routers` |
 | `analysis/trending.py` | `config`, `schemas` | `services/llm_service.py` — **no LLM import, ever** |
 | `analysis/augmentation.py` | `config`, `schemas`, `analysis/technical_indicators.py`, `retrieval/sql_retriever.py` (types only), `retrieval/vector_retriever.py` (types only) | `services/llm_service.py` — no LLM import; `services/db.py` — pure function, caller fetches rows |
+| `analysis/synthesis.py` | `config`, `schemas`, `retrieval/hybrid_search.py` (types only), `retrieval/temporal.py` (`temporal_weight`), `retrieval/vector_retriever.py` (types only) | `services/llm_service.py` — **no LLM import, ever**; `services/db.py` — pure function |
 | `analysis/analysis_store.py` | `config`, `schemas` | `routers` |
 | `prompts/*` | `schemas` | everything else |
 | `routers/*` | anything above | — (holds no business logic) |
@@ -192,7 +195,9 @@ retrieval types, and it does so directly, in a fixed order:
 routers/analyze.py
  → retrieval/sql_retriever.py     (recent market_observations + past analyses)
  → retrieval/vector_retriever.py  (top-k document_chunks, threshold + soft-fail)
- → services/llm_service.py        (one generation call over both)
+ → analysis/augmentation.py       (assemble one XML-delimited context, Phase 11)
+ → analysis/synthesis.py          (deterministic per-citation weight + anchor, Phase 12)
+ → services/llm_service.py        (one generation call, reasons over the aggregate)
  → guardrails/analysis_guard.py   (validate + reliability-tier rule)
  → analysis/analysis_store.py     (persist)
 ```
@@ -666,3 +671,77 @@ loader → parser → normalizer → (chunk → embed, for Axis-3 sources) → s
   bars; `refresh_daily_bars` only pulls a 5-day window) while still
   reporting `volatility`/`window_days`, exactly `technical_indicators.py`'s
   intended "insufficient data stays absent, never invented" behavior.
+
+### ADR-010 — Generation built (Phase 12): a domain-transfer decision for the deterministic anchor, and the first real LLM calls (2026-09-10)
+
+- **Status**: Accepted.
+- **Context**: `CLAUDE.md` §7 Phase 12 scoped `s11-02`'s two-stage
+  synthesis — a deterministic weighted-citation aggregate computed in
+  code, then one Instructor-validated generation call that reasons over
+  it. `s11-02`'s own reference domain (historical budget estimation)
+  weighted-medians a number that exists **in the source text itself**
+  (hours). This project's citations — news/filing chunks — carry no such
+  number, and ADR-007 already closed the obvious way to manufacture one
+  (a per-article LLM sentiment call: "a real cost multiplier for no
+  proven benefit over computing stance once, at analysis time").
+- **Decision**: `_keyword_lean` (`analysis/synthesis.py`) fills the gap
+  the same way `s11-02` fills its own — cheaply and deterministically, not
+  with a model call, so it doesn't reopen ADR-007. A small, documented
+  bullish/bearish lexicon scores each citation's content in `[-1, 1]`
+  purely by word count; `0.0` means no lexicon hit, not "confirmed
+  neutral". `combined_weight` uses exactly `CLAUDE.md`'s three named
+  signals — `fusion_rank` (0.40), `temporal_weight` (0.35),
+  `reliability_tier` (0.25, weighted least because every currently-included
+  source already clears ADR-006's quality floor, so it differentiates the
+  set less than the other two). `aggregate_evidence` implements `s11-02`'s
+  contradiction logic **corrected**, matching the handbook's own editor's
+  note on the reference's bug: `strong_low`/`strong_high`/`contested` are
+  computed over `weight >= 0.4` citations only, never the full set, so a
+  lone weak outlier cannot manufacture a contradiction or widen the range
+  the model is told to stay within. `contested` itself uses an absolute
+  sign-disagreement threshold (`±0.3`), not `s11-02`'s relative-spread
+  formula, which degenerates when the anchor sits near zero — the common
+  case for a value that is zero-centered and bounded, unlike always-positive
+  hours.
+- **A small Phase 10 contract extension, made honest by necessity**:
+  computing `fusion_rank` as an independent signal required
+  `RetrievalResult` (`vector_retriever.py`) to expose the RRF-fused rank
+  **before** temporal re-sorting, as a new `fused_rank` field — reusing the
+  final, already-temporally-weighted candidate order would have
+  double-counted temporal effects into a signal `CLAUDE.md` treats as
+  independent of it. Live-verified via a dedicated regression test: a
+  stale-but-semantically-best candidate correctly shows `fused_rank=1`
+  even though temporal weighting demotes it in the final candidate order.
+- **The first real LLM calls in this project**: `services/llm_service.py`
+  uses `instructor.from_litellm(litellm.completion)` — `gpt-4o-mini`
+  primary, `claude-haiku-4-5-20251001` fallback on any exception from the
+  primary call, matching `CLAUDE.md` §4's stated stack. Both paths were
+  live-verified with real API calls, not assumed: a raw `litellm.completion`
+  sanity check confirmed the fallback model string actually resolves (a
+  genuine risk — `litellm`'s static model registry can lag a model's
+  release), and a second run forced the primary call to fail with a
+  deliberately invalid key (never a real one) to confirm the fallback
+  succeeds through the full `generate_synthesis()`/Instructor retry
+  integration, not just bare `litellm`.
+- **Verification (2026-09-10)**: 18 new tests (the deterministic aggregate,
+  the corrected contradiction logic, prompt rendering against the real
+  template files, the LLM client mocked for both the success and fallback
+  paths); 137 passing total. Live, same temporary-dev-Postgres discipline
+  as ADR-008/009 (`fantasy-postgres-1` confirmed healthy throughout and
+  after teardown): the full Phase 10-12 pipeline run against real `AAPL`
+  data produced `stance=NEUTRAL` with a rationale that correctly explained
+  a real `contested=True` signal (conflicting SEC filing risk-factor
+  language) rather than averaging past it, citing two `chunk_id`s
+  independently confirmed present in the real retrieved set — no
+  hallucinated citation observed, though nothing code-enforces that yet
+  (Phase 13). One expected, named limitation observed on real data, not a
+  bug: every citation's `_keyword_lean` saturated at exactly `±1.0` in
+  this run (SEC "Risk Factors" headers are keyword-dense in one direction
+  regardless of whether they disclose anything new), so `contested=True`
+  fires often when a filing chunk and a bullish news chunk are retrieved
+  together — a known trade-off of a word-matching heuristic, left for
+  Phase 17's eval harness to measure rather than patched on a guess.
+- **Scoping, matching Phases 10-11's own precedent**: no router, no
+  `analyses` table, no persistence built yet. Phase 13's guardrail is what
+  computes `quality_status`; persisting a row without one would be a
+  half-built feature, not this phase's deliverable.

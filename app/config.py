@@ -47,6 +47,11 @@ class Settings(BaseSettings):
     # of the theoretical ceiling)
     analysis_context_token_budget: int = 12_000
 
+    # Generation (Phase 12) — LiteLLM model strings; gpt-4o-mini primary,
+    # a Claude Haiku fallback if the primary call raises (tech stack §4)
+    generation_model_primary: str = "gpt-4o-mini"
+    generation_model_fallback: str = "claude-haiku-4-5-20251001"
+
 
 @lru_cache
 def get_settings() -> Settings:
