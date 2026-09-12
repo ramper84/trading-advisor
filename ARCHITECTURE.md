@@ -1045,3 +1045,51 @@ loader → parser → normalizer → (chunk → embed, for Axis-3 sources) → s
   logic changed). Phase 16 (reranking) and Phase 17 (evals) remain the
   two deliberately-unbuilt, explicitly-reserved items — not gaps, named
   choices per their own ADR/§8 entries.
+
+### ADR-014 — Discovery capability, D1-D2: general news ingestion; a pre-existing RSS timezone bug found and fixed (2026-09-12)
+
+- **Status**: Accepted.
+- **Context**: `CLAUDE.md`'s "Extension — Discovery" section (`PLAYBOOK.md`
+  §11.7) scoped a new `general_news_items` table and a general (non-
+  symbol-filtered) RSS ingestion path — D1-D2 of that section's own
+  build order.
+- **Decision**: `general_news_items` is a plain SQL table (Axis 2), not a
+  relaxed `document_chunks` (Axis 3) — there is no semantic query to
+  retrieve these against, only "what's recent", and forcing embedding-
+  shaped storage onto SQL-shaped data is the exact anti-pattern
+  `PLAYBOOK.md` §2 names. Unique on `(source_name, url)`, `ON CONFLICT DO
+  NOTHING` — a published article's content doesn't get corrected the way
+  a filing might, unlike `document_chunks`'s `DO UPDATE ... WHERE
+  source_hash != EXCLUDED.source_hash`.
+- **A real bug found live, predating this capability entirely**:
+  `rss_parser.py`'s existing (Phase 3-4/9) date handling used
+  `time.mktime()` on `feedparser`'s `published_parsed` field.
+  `feedparser` normalizes that field to UTC; `time.mktime()` instead
+  assumes the struct is in the *process's own local timezone* — on this
+  build host (`America/Mexico_City`, UTC-6), every RSS-sourced article
+  was silently stored with a `published_at` **six hours in the future**.
+  Invisible on a UTC-local host, which is exactly why it went uncaught
+  through Phase 9's own live verification. Caught here only because
+  `get_recent_general_news(lookback_days=0)` returned rows it should not
+  have — comparing the freshly-ingested timestamps against Postgres's own
+  `now()` surfaced the exact ~6-hour skew. Fixed with `calendar.timegm()`
+  (the timezone-independent inverse of `time.gmtime()`, the correct
+  choice for a struct already known to be UTC) via a shared
+  `_parsed_published_at()` helper now used by both `parse_rss_for_symbol`
+  and the new `parse_rss_general`. The regression test asserts an exact
+  UTC value from a fixture with a non-UTC offset (not just a bare year),
+  specifically because a same-value assertion would have passed on a
+  UTC-local host without ever exercising the bug.
+- **Consequence for already-persisted data**: every `document_chunks` row
+  from `elfinanciero_news`/`el_economista_news` ingested before this fix
+  carries a `published_at` up to 6 hours later than true. Bounded and not
+  worth a backfill: `temporal.py`'s half-life decay is measured in days,
+  so a 6-hour error moves a weight by a fraction of a percent. Named here
+  so it is a known, accepted fact, not a rediscovered mystery.
+- **Verification (2026-09-12)**: 12 new tests; 182 passing total. Live:
+  200 real articles ingested across both RSS sources on a temporary dev
+  Postgres, confirmed idempotent on re-fetch, confirmed genuinely mixed
+  financial/non-financial content. Re-ingested after the timezone fix and
+  confirmed the freshest article now lands minutes, not hours, before
+  Postgres's own `now()`; `get_recent_general_news(lookback_days=0)`
+  correctly returns zero rows post-fix, non-zero for `lookback_days=1`.

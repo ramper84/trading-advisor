@@ -7,6 +7,7 @@ from app.retrieval.sql_retriever import (
     get_latest_fundamentals,
     get_monitored_symbols,
     get_recent_daily_bars,
+    get_recent_general_news,
     get_recent_observations,
 )
 
@@ -80,3 +81,20 @@ def test_get_monitored_symbols_all_when_not_active_only():
     sql, params = cursor.execute.call_args[0]
     assert "WHERE" not in sql
     assert params == ()
+
+
+def test_get_recent_general_news_maps_rows_and_windows_by_lookback():
+    row = (1, "elfinanciero_news", 4, "Headline", "Summary", "https://x.mx/a", datetime(2026, 9, 12, tzinfo=timezone.utc))
+    conn, cursor = _conn_returning([row])
+    results = get_recent_general_news(lookback_days=3, limit=50, conn=conn)
+    assert len(results) == 1
+    assert results[0].source_name == "elfinanciero_news"
+    sql, params = cursor.execute.call_args[0]
+    assert "general_news_items" in sql
+    assert "ORDER BY published_at DESC" in sql
+    assert params == (3, 50)
+
+
+def test_get_recent_general_news_empty():
+    conn, _ = _conn_returning([])
+    assert get_recent_general_news(lookback_days=3, conn=conn) == []

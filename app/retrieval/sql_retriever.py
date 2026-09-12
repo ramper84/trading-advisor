@@ -117,6 +117,21 @@ class AnalysisRow:
     rationale: str
 
 
+@dataclass
+class GeneralNewsItemRow:
+    """Discovery's own read (CLAUDE.md's "Extension — Discovery") — no
+    `symbol` field, unlike every other row in this module: a general news
+    item is never scoped to one monitored symbol."""
+
+    id: int
+    source_name: str
+    reliability_tier: int
+    headline: str
+    summary: str
+    url: str
+    published_at: Optional[datetime]
+
+
 def _query(conn: Optional[psycopg.Connection], sql: str, params: tuple) -> list[tuple]:
     if conn is not None:
         with conn.cursor() as cur:
@@ -229,3 +244,20 @@ def get_recent_analyses(
         (symbol, limit),
     )
     return [AnalysisRow(*r) for r in rows]
+
+
+def get_recent_general_news(
+    lookback_days: int, limit: int = 200, conn: Optional[psycopg.Connection] = None
+) -> list[GeneralNewsItemRow]:
+    """Discovery's own read: a time-windowed batch, not a search result —
+    there is no query to retrieve against, only "what's recent" (CLAUDE.md's
+    "Extension — Discovery" Axis-2 decision)."""
+    rows = _query(
+        conn,
+        "SELECT id, source_name, reliability_tier, headline, summary, url, published_at "
+        "FROM general_news_items "
+        "WHERE published_at >= now() - (%s || ' days')::interval "
+        "ORDER BY published_at DESC LIMIT %s",
+        (lookback_days, limit),
+    )
+    return [GeneralNewsItemRow(*r) for r in rows]

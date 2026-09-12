@@ -1137,3 +1137,44 @@ real-shaped fixtures, then live verification against a temporary dev
 Postgres (never `fantasy-postgres-1`) with real API calls, bugs found and
 fixed on the spot, documented here and in `ARCHITECTURE.md`, then
 committed.
+
+### D1-D2 — done (2026-09-12)
+
+`general_news_items` migration (unique on `(source_name, url)` — a real
+natural key here), `rss_parser.parse_rss_general` (a sibling to
+`parse_rss_for_symbol`, no keyword filter), `general_news_store.py`
+(`ON CONFLICT DO NOTHING`, not `DO UPDATE` — a published article's content
+doesn't get corrected the way a filing might), and
+`sql_retriever.get_recent_general_news()`. 12 new tests.
+
+**Live-verified against real RSS feeds and a temporary dev Postgres**
+(`fantasy-postgres-1`'s daemon was actually reachable this pass, but a
+separate temporary container was still used, same standing rule): 200
+real articles ingested across both sources, correctly idempotent on
+re-fetch, correctly mixed financial and non-financial content (confirming
+these are genuinely general feeds, exactly what discovery needs to read).
+
+**A real, pre-existing bug found and fixed, affecting Phase 9's
+already-shipped RSS ingestion, not just this new capability**:
+`rss_parser.py` used `time.mktime()` to convert `feedparser`'s
+`published_parsed` to an epoch timestamp. `feedparser` already normalizes
+that field to UTC; `time.mktime()` instead interprets *any* struct as the
+*process's own local timezone* — on this host
+(`America/Mexico_City`, UTC-6), every RSS-sourced article's `published_at`
+was silently stored **six hours in the future**. Caught only because
+`get_recent_general_news(lookback_days=0)` returned rows it should not
+have, which led to comparing freshly-ingested timestamps against
+Postgres's own `now()` — the discrepancy would have been invisible on a
+UTC-local host, which is exactly why the regression test asserts an
+*exact* UTC value from a fixture with a non-UTC offset, not just a year.
+Fixed with `calendar.timegm()` (the timezone-independent inverse of
+`time.gmtime()`, correct for a struct already known to be UTC) via a
+shared `_parsed_published_at()` helper, used by both
+`parse_rss_for_symbol` and `parse_rss_general`. **Consequence for
+already-persisted data**: every `document_chunks` row from
+`elfinanciero_news`/`el_economista_news` ingested before this fix has a
+`published_at` up to 6 hours later than the true value — a real but
+bounded skew (`temporal.py`'s half-life decay is measured in days, so a
+6-hour error changes a weight by a fraction of a percent); not worth a
+backfill migration for a personal tool's news-recency weighting, named
+here so it isn't rediscovered as a mystery later.
