@@ -987,3 +987,153 @@ phases the prior architecture skipped:
     what was actually built, closing out the core build plan through
     Phase 20; Phase 17 (evals) and Phase 16 (reranking, reserved) remain
     the two named, deliberately-not-yet-built items.
+
+## Extension — Discovery: company suggestions from general news (2026-09-12)
+
+Added per `PLAYBOOK.md` §11.7 ("extend `CLAUDE.md` to add `<capability>`") —
+the one sanctioned way to reopen this file after v1. This is new content
+under its own heading; nothing above this line was rewritten to match it.
+
+### Why this needed a fresh architecture pass, not a bolt-on
+
+Every existing capability (`/analyze`, trending, monitor) starts from a
+symbol the operator already picked. The operator asked for the opposite: a
+feed that reads general market news and *suggests* companies worth a
+look, acting "as an experienced trader," explicitly as an orchestrated
+Actor-Critic-Boss pipeline. `PLAYBOOK.md` §2's axes were run fresh
+against this one capability, not re-litigated for the ones already
+shipped:
+
+- **Axis 1 (CAG)**: no — the corpus (recent general news) changes
+  between runs.
+- **Axis 2 (SQL, exact entities)**: yes, for the *retrieval* side only —
+  "give me recent general articles" is a `WHERE published_at > cutoff`
+  read, no embedding needed. There is no user query to semantically match
+  against; the Actor reads a time-windowed batch, not a search result.
+- **Axis 3 (vector RAG)**: explicitly **not** used for this capability's
+  storage. Reusing `document_chunks` (embedding-shaped, `symbol NOT NULL`)
+  for general articles would repeat the exact anti-pattern
+  `PLAYBOOK.md` §2 names: *"do not embed a corpus that Axis 2 already
+  answered with SQL."* A new, plain SQL table instead (`general_news_items`).
+- **Axis 4 (Agentic Actor-Critic-Boss)**: **yes — this is the fit**, and
+  per the framework's own stated default, Critic and Boss are
+  **deterministic code, not a second model call** — reserve a real LLM
+  call for the critic only when a check genuinely needs judgment no rule
+  can express. None of this capability's checks do.
+- **Axis 5 (multi-agent orchestration)**: **no.** The trigger conditions
+  (unknowable step count/order, multiple heterogeneous specialist roles
+  whose *number* is data-dependent, a router whose capability set grows
+  over time) don't fire — this is one specialist role in a fixed,
+  enumerable sequence. Building a graph-orchestration layer here would be
+  the "speculative infrastructure" `PLAYBOOK.md` repeatedly warns against
+  for a personal, single-user tool. Named explicitly so nobody adds
+  routing this doesn't need, the same discipline ADR-004's Axis-5 "No"
+  row already established for `/analyze`.
+- **Composition with `/analyze`**: an independent path sharing only
+  plumbing (`services/market_data.py`, `services/llm_service.py`) — no
+  conductor, staying Lean tier. A suggestion routes the operator *into*
+  `/analyze` (pre-filled with the suggested symbol) rather than adding to
+  `monitored_symbols` directly — a suggestion is a lead, not a grounded
+  analysis, and it must pass through the real guardrailed pipeline before
+  it can result in a monitored symbol, never bypass it.
+- **Trigger**: scheduled only (operator's explicit choice, 2026-09-12) —
+  `refresh_worker` runs it on a daily cadence, matching
+  `economic_indicators`'s own "economy-wide, one fetch, not per-symbol"
+  pattern; the UI only ever reads the latest persisted batch, never
+  triggers a scan itself.
+
+### Concrete design
+
+**New table, `general_news_items`** (Axis 2, no embedding): `id`,
+`source_name`, `reliability_tier` (copied from the catalog source at
+ingest, same convention as `document_chunks`), `headline`, `summary`,
+`url`, `published_at`, `ingested_at`. Unique on `(source_name, url)` — an
+article's URL is a real, stable natural key here (unlike
+`document_chunks`'s synthetic `document_id`, needed only because a filing
+splits into multiple chunks per document).
+
+**Sources, v1 scope**: `elfinanciero_news` and `el_economista_news` only
+— both are already general-purpose feeds by nature (a sector/homepage
+RSS, not filtered to one company), so no new catalog entries or new
+vendor integrations are needed. Finnhub's `/news?category=general`
+endpoint (a real, distinct general-market-news endpoint, different from
+the already-used per-symbol `/company-news`) is a named, deliberately
+deferred addition — reserved, not built now, since the two RSS sources
+alone are sufficient to build and verify the capability honestly before
+widening it.
+
+**New parser function**: `rss_parser.parse_rss_general(feed, source_name)`
+— a sibling to the existing `parse_rss_for_symbol`, skipping its
+keyword-filter step entirely; both converge on the same `RawArticle`
+shape already defined for the existing news parsers.
+
+**Actor** (`services/llm_service.py`, a new function alongside
+`generate_synthesis`, same `instructor.from_litellm` client, same
+`gpt-4o-mini`/Haiku-4.5 fallback pair): given a batch of recent
+`general_news_items` rows, produce `DiscoverySuggestions` (Instructor/
+Pydantic, `app/schemas.py`) — a list of `SuggestedCompany` (`symbol`,
+`company_name`, `reasoning`, `source_article_ids: list[int]`). System
+prompt frames the persona explicitly as an experienced trader scanning
+for catalysts, sector momentum, and unusual news density — not "anything
+mentioning a company name."
+
+**Critic** (`app/guardrails/discovery_guard.py`, deterministic code, no
+LLM import — mirrors `analysis_guard.py`'s own existing shape):
+1. **Citation integrity**: every `source_article_id` a suggestion cites
+   must have been in the batch actually given to the Actor — the same
+   dangling-citation check as `check_citation_integrity`, applied here.
+2. **Symbol resolution**: every suggested `symbol` must actually resolve
+   via `market_data.get_instrument_info()` — confirmed live
+   (2026-09-12) that a bogus symbol returns a near-empty dict (one stray
+   key, no `symbol`/`quoteType`) rather than raising, so resolution is
+   checked by presence of `info.get("symbol")` **and**
+   `info.get("quoteType")`, not by catching an exception that never
+   comes.
+3. **Reliability-tier rule**: reused as-is — a suggestion needs its
+   citations to include at least one source with `reliability_tier >= 3`
+   (trivially satisfied today, same defense-in-depth posture as the
+   existing rule, since both configured sources score `>= 4`).
+
+**Boss** (`app/analysis/discovery.py`): calls the Actor once, runs the
+Critic over every suggestion, and for any suggestion that fails: retries
+the *whole Actor call* once with feedback naming exactly which
+suggestions were rejected and why, then — past that one retry — drops
+only the still-failing suggestions (never the whole batch) and logs what
+was dropped, the same "never silently discard" discipline
+`augmentation.py`'s token-budget cutoff already established.
+
+**New table, `suggestions`** (append-only, like `analyses` — no
+`dismissed`/status tracking for v1, not asked for): `id`, `symbol`,
+`company_name`, `reasoning`, `source_article_ids` (JSONB), `generated_at`.
+The UI reads the latest batch by `generated_at`, nothing more.
+
+**`refresh_worker` integration**: a new daily-cadence job — fetch both
+RSS sources' full feeds (`parse_rss_general`), upsert into
+`general_news_items`, read the last `DISCOVERY_LOOKBACK_DAYS` (a
+worker-file constant, matching `FRED_LOOKBACK_DAYS`'s own precedent —
+not a `Settings` field, since it isn't operator-tunable) worth of rows,
+run the Boss loop, persist to `suggestions`.
+
+**New Reflex page, `/feeds`**: lists the latest suggestions (symbol,
+company name, reasoning, source links) with a link into `/analyze`
+pre-filled with the suggested symbol and a sensible default query — never
+a direct "add to monitor" from an unguarded suggestion.
+
+### Build order (own numbering, D1-D6 — not a continuation of Phases 1-20's numbering, since this is a `PLAYBOOK.md` §11.7 extension, not the original v1 plan)
+
+1. **D1** — `general_news_items` migration + `parse_rss_general` +
+   `general_news_store.py`, tested + live-verified against both real RSS
+   feeds.
+2. **D2** — `sql_retriever.get_recent_general_news()`.
+3. **D3** — Actor (`generate_discovery_suggestions` in `llm_service.py`)
+   + `DiscoverySuggestions`/`SuggestedCompany` schemas.
+4. **D4** — Critic (`discovery_guard.py`) + Boss (`discovery.py`),
+   `suggestions` migration + store.
+5. **D5** — `refresh_worker` daily-cadence integration.
+6. **D6** — `/feeds` Reflex page.
+
+Each phase gets the same discipline as Phases 1-20: real tests against
+real-shaped fixtures, then live verification against a temporary dev
+Postgres (never `fantasy-postgres-1`) with real API calls, bugs found and
+fixed on the spot, documented here and in `ARCHITECTURE.md`, then
+committed.

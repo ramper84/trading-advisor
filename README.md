@@ -52,6 +52,13 @@ on a locally-run TradingView Desktop app. Both are gone, not paused — see
 - Provide a **consolidated dashboard**: one chart of every monitored
   symbol together, with the ability to select one and see its full detail
   (chart, past analyses, and the sources cited in each).
+- Provide a **discovery feed**: on a daily schedule, scan general
+  (non-symbol-filtered) news from the already-configured professional
+  sources and suggest companies worth a look, each with a plain-language
+  reason and links to the source articles — never added to the monitor
+  list directly; a suggestion routes into the analyze form so it passes
+  through the same grounded, guardrailed pipeline as any other lookup.
+  Added 2026-09-12, `CLAUDE.md`'s "Extension — Discovery" section.
 
 ## 2a. Example queries
 
@@ -70,6 +77,8 @@ on a locally-run TradingView Desktop app. Both are gone, not paused — see
 - "Buy me 10 shares of TSLA." — explicitly **out of scope**: the system has
   no way to act on this and must say so, not quietly reinterpret it as an
   analysis request.
+- "What companies is the feed suggesting today, and why?" — the discovery
+  capability; answered from a daily scan, not computed on demand.
 
 ## 3. User profile
 
@@ -252,3 +261,7 @@ on a locally-run TradingView Desktop app. Both are gone, not paused — see
       not built early as scope creep.
 - [ ] Phase 16 (reranking) and Phase 17 (evals) remain — both reserved,
       not gaps; build when asked for
+- [ ] Discovery capability (`CLAUDE.md`'s "Extension — Discovery",
+      2026-09-12): a daily-scheduled Actor-Critic-Boss scan of general
+      news suggesting companies worth a look. Architecture decided,
+      build order D1-D6 specified, not yet built.
