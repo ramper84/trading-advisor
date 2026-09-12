@@ -948,3 +948,100 @@ loader → parser → normalizer → (chunk → embed, for Axis-3 sources) → s
   identified. This is a production-container-serving gap, not a defect in
   the UI itself, which is fully built and live-verified via `reflex run`.
   `docker compose up` is not considered validated until this is resolved.
+
+### ADR-013 — Phase 19-20: both open/found frontend bugs root-caused and fixed; local validation complete (2026-09-12)
+
+- **Status**: Accepted.
+- **Context**: ADR-012 left one known bug open explicitly for this phase
+  (dynamic routes 404 in `reflex run --env prod --single-port`). Running
+  the actual `docker compose up` stack for the first time — not just the
+  `frontend` image in isolation, as ADR-012's own preview did — surfaced
+  a second, more subtle bug that only a full click-through of the user
+  journey could have found.
+- **Bug 1 root cause (the one ADR-012 left open)**: read directly from
+  Reflex's own source (`reflex.utils.exec.get_frontend_mount`) rather
+  than guessed. `get_frontend_mount()` mounts the compiled frontend as a
+  bare `PrecompressedStaticFiles(..., html=True)` — Starlette's static
+  file server, which serves `index.html` only for a directory that
+  actually exists on disk. A dynamic route's arbitrary value (`AAPL`,
+  `WALMEX.MX`, anything) has no such directory, since react-router's
+  static export cannot enumerate every possible value at build time.
+  Inspecting a real `reflex export` build's output
+  (`.web/build/client/`) confirmed the export process already generates
+  `__spa-fallback.html` — a bootable shell built for exactly this case —
+  but nothing in Reflex's own serving code ever references that file; an
+  unmatched path just gets Starlette's default 404. **Decision**: fix it
+  in application code, not by patching Reflex — `frontend/frontend.py`
+  now passes `api_transformer=` (Reflex's own documented extension point
+  for wrapping the backend ASGI app) a small Starlette instance with one
+  explicit `Route("/symbols/{symbol}", ...)` that serves
+  `__spa-fallback.html` directly, ahead of the rest of the app being
+  mounted at `""`. Scoped to exactly this app's one dynamic route, not a
+  blanket catch-all that would mask genuinely bogus paths. Verified live
+  twice: a raw `reflex run --env prod --single-port` locally, then again
+  through a real `docker compose up`, both via a genuine browser
+  navigating directly to the URL (not a client-side link click — the
+  harder case, since it forces a fresh server round trip with no
+  existing app state).
+- **Bug 2, found only by exercising the real compose stack end to end**:
+  `dashboard.py`/`symbol_detail.py` triggered their data loads via each
+  page's own `on_mount` component prop. `on_mount` is a React
+  component-lifecycle hook — it fires when a component is first inserted
+  into the DOM, and does **not** refire when react-router keeps the same
+  mounted component alive across a later navigation back to its route
+  (exactly what an SPA is supposed to do for performance). A symbol added
+  to the watchlist from the analyze page therefore never appeared on the
+  dashboard without a full hard refresh — invisible in every prior
+  single-page check this project had done, since none of them navigated
+  away and back within one browser session. **Decision**: moved both to
+  `on_load=` at `app.add_page(...)` registration instead —
+  `add_page`'s own documented parameter, specifically designed to fire
+  on every navigation *to* a route regardless of whether the component
+  was already mounted. Verified live: added `AAPL` to monitor from the
+  analyze page, navigated back to `/`, saw it appear with real
+  price/change data with no manual reload — the exact failure this fix
+  closes.
+- **Golden-set confirmation, deliberately scoped to what this phase
+  itself asks for, not Phase 17's separate harness**: `evals/
+  golden_queries.json` and `measure_retrieval.py` remain unbuilt — that
+  is Phase 17's own named deliverable, and building it now would be
+  scope creep past "phase 19 and 20" as actually requested. The two
+  specific properties this phase's own checklist names were instead
+  confirmed directly against the live stack: an analysis on a genuinely
+  unknown symbol (`ZZZZFAKE`) correctly produced
+  `quality_status=insufficient`/`stance=NEUTRAL`/`confidence=0.0` — and,
+  more tellingly, did so via the citation-integrity check actually
+  firing on a real hallucinated citation (`chunk_id=0`, never retrieved),
+  not merely because retrieval happened to be thin. The reliability-tier
+  invariant is enforced in code and unit-tested but **honestly not
+  independently live-testable today**: every currently-included catalog
+  source already scores `reliability_tier >= 4` (ADR-006), so no real
+  citation exists that could violate the `>= 3` floor — stated plainly
+  rather than staged with synthetic data to fake a live confirmation.
+- **A real credential-safety incident, not a code bug, recorded for the
+  same reason ADR-008's was**: debugging why a temporary
+  `docker-compose.override.yml` port override wasn't taking effect led
+  to running `docker compose config` unfiltered, which printed all four
+  real secrets (`ANTHROPIC_API_KEY`, `BANXICO_SIE_TOKEN`,
+  `FINNHUB_API_KEY`, `FRED_API_KEY`) into the session transcript in
+  plaintext. Flagged to the operator immediately; all four were advised
+  for rotation. No file or commit was affected — the exposure was a
+  transient tool-output stream only — but a credential seen in a
+  transcript is treated as compromised regardless of where else it might
+  leak, the same posture ADR-008 already established. Carried forward as
+  a standing rule: never run a full env/config dump in this repository
+  unfiltered, for any reason, including debugging a compose override.
+- **`fantasy-postgres-1`, again**: Docker Desktop's daemon was down
+  throughout this validation, same as Phases 13/18 — confirmed via a
+  failed `docker ps`, not assumed. All work used a separate, native
+  `dockerd`, zero interaction with the real Desktop-hosted
+  `fantasy-postgres-1` either way. One incidental discovery reported to
+  the operator, not acted on: a second, dormant `fantasy-postgres-1`
+  container object exists under the native context (state `created`,
+  never started, dated three weeks before this session, its own separate
+  volume) — left untouched; not this project's concern to clean up.
+- **Consequence**: this closes the phase list's core build plan through
+  Phase 20. 174 tests passing (both bugs were frontend-only; no backend
+  logic changed). Phase 16 (reranking) and Phase 17 (evals) remain the
+  two deliberately-unbuilt, explicitly-reserved items — not gaps, named
+  choices per their own ADR/§8 entries.

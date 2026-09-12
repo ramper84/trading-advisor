@@ -78,5 +78,4 @@ def dashboard() -> rx.Component:
             padding_y="2em",
         ),
         max_width="900px",
-        on_mount=DashboardState.load,
     )

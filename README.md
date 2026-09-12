@@ -231,7 +231,24 @@ on a locally-run TradingView Desktop app. Both are gone, not paused — see
       Reflex's bundled `bun`), **one left open for Phase 19-20**: dynamic
       routes 404 under `reflex run --env prod --single-port` in a real
       container.
-- [ ] Phase 14-15 skipped (no agentic loop, no orchestration trigger);
-      Phase 16 (reranking) reserved — next up is Phase 17 (evals) or
-      Phase 19-20 (docker compose validation, including the open Reflex
-      prod-routing bug above), whichever is asked for
+- [x] Phase 14-15 skipped (no agentic loop, no orchestration trigger).
+- [x] Phase 19-20 — local validation: `docker compose up` run for real,
+      end to end, not just individual containers. Fixed the dynamic-route
+      404 left open by Phase 18 (Reflex's static export already builds a
+      `__spa-fallback.html` shell for exactly this case; the built-in
+      server just never served it — wired up by hand via `api_transformer`)
+      and a second bug found only by clicking through the full user
+      journey against the real stack: the dashboard/symbol-detail pages
+      used `on_mount`, which doesn't refire on revisiting an
+      already-mounted SPA route, so a newly-monitored symbol never
+      appeared without a hard refresh — fixed by switching to `add_page`'s
+      `on_load`. Confirmed live: a genuinely unknown symbol correctly
+      abstains (`insufficient`/`NEUTRAL`), even catching a hallucinated
+      citation along the way. 174 tests passing. **A real credential
+      exposure happened during this pass** (a debugging `docker compose
+      config` call printed all four API keys/tokens in plaintext) — all
+      four were rotated. Full `evals/golden_queries.json` harness stays
+      Phase 17's own separate, not-yet-built deliverable, deliberately
+      not built early as scope creep.
+- [ ] Phase 16 (reranking) and Phase 17 (evals) remain — both reserved,
+      not gaps; build when asked for

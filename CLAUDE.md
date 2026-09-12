@@ -898,3 +898,92 @@ phases the prior architecture skipped:
     `reflex run --env prod --single-port` in a real container — `docker
     compose up` cannot be considered validated while `/symbols/{symbol}`
     doesn't actually serve.
+
+    **Done (2026-09-12).** Phase 18's open item investigated and fixed
+    first: reading Reflex's own source
+    (`reflex.utils.exec.get_frontend_mount`) and inspecting a real
+    `reflex export` build's output confirmed react-router's static export
+    already generates `__spa-fallback.html` — a bootable shell for
+    exactly the "dynamic route, value unknown at build time" case — but
+    Reflex's built-in prod static server never serves it, a plain 404
+    instead. Fixed in `frontend/frontend.py` via `api_transformer`
+    (Reflex's own documented extension point): one explicit Starlette
+    route matches `/symbols/{symbol}` and serves that shell directly;
+    client-side react-router resolves the actual symbol once the bundle
+    boots. Confirmed live, twice — a raw `reflex run --env prod
+    --single-port` locally, then again through a real `docker compose up`
+    — both times with a genuine browser navigating directly to
+    `/symbols/AAPL` (not a client-side link click, the harder case), full
+    hydration, zero console errors.
+
+    **`docker compose up` then surfaced a second real bug**, found only
+    by actually clicking through the full user journey (analyze → add to
+    monitor → back to dashboard) against the real compose stack, not by
+    curl or a single-page check: the dashboard and symbol-detail pages
+    used each page's own `on_mount` prop to trigger `DashboardState.load`/
+    `SymbolState.load`. `on_mount` is a component-lifecycle hook — it
+    doesn't refire when navigating back to a route already mounted once
+    in the same SPA session, since react-router keeps the app shell alive
+    across navigation. A real symbol added to the watchlist from the
+    analyze page therefore never appeared on the dashboard without a hard
+    browser refresh. Fixed by moving both to `on_load` at
+    `app.add_page(..., on_load=...)` registration — Reflex's own
+    documented page-level hook, specifically meant to fire on every
+    navigation *to* a route. Confirmed live: added `AAPL` to monitor from
+    the analyze page, navigated back to `/`, saw it appear with real
+    price/change data with no manual reload.
+
+    **Golden-set-style confirmation, scoped to what Phase 19-20 itself
+    asks for — not Phase 17's own full harness build**: `evals/
+    golden_queries.json`/`measure_retrieval.py` remain Phase 17's
+    separate, not-yet-built deliverable; building them now would be
+    scope creep past what was actually asked ("phase 19 and 20"). Instead,
+    the two specific properties Phase 19-20 names were confirmed directly
+    against the live `docker compose` stack: **the abstention case** — an
+    analysis on a genuinely unknown symbol (`ZZZZFAKE`) correctly landed
+    on `quality_status=insufficient`, `stance=NEUTRAL`, `confidence=0.0`,
+    and — a stronger confirmation than a clean case would have been — the
+    model actually hallucinated a citation (`chunk_id=0`, never in the
+    retrieved set, since retrieval was empty) and `guard_analysis` caught
+    it anyway via the fully-dangling-citation check, forcing
+    `insufficient` regardless. **The reliability-tier invariant** is
+    enforced in code and unit-tested (`test_analysis_guard.py`), but is
+    honestly **not independently live-testable against real data right
+    now**: every currently-included catalog source already scores
+    `reliability_tier >= 4` (ADR-006 dropped the one source that
+    didn't), so no real citation exists today that *could* violate the
+    `>= 3` floor — stated plainly rather than staged with synthetic data
+    to manufacture a live-looking test.
+
+    **A separate, real credential-safety incident during this pass, not
+    a code bug**: a raw `docker compose config` call — run to debug why a
+    `docker-compose.override.yml` port override wasn't taking effect —
+    printed all four real secrets (`ANTHROPIC_API_KEY`, `BANXICO_SIE_TOKEN`,
+    `FINNHUB_API_KEY`, `FRED_API_KEY`) in plaintext into the session
+    transcript. Flagged to the operator immediately, who was advised to
+    rotate all four. No project file or commit was affected — the
+    exposure was transient, in a tool-output stream only — but it is
+    recorded here because a credential seen in a session transcript is
+    treated as compromised regardless of where else it may have leaked,
+    matching this project's own established discipline from ADR-008's
+    `FRED_API_KEY` incident. The lesson carried forward: never run a
+    full env/config dump command in this repository without redaction,
+    for any reason, including debugging.
+
+    **`fantasy-postgres-1` note**: Docker Desktop's own daemon was down
+    throughout this validation for unrelated reasons (confirmed via a
+    failed `docker ps`, not assumed) — the same situation as Phases
+    18/13. All work used a separate, native `dockerd` (`docker --context
+    default`), with zero interaction with the real, Desktop-hosted
+    `fantasy-postgres-1` either way. One incidental discovery, reported
+    to the operator but not acted on: a *second*, dormant
+    `fantasy-postgres-1` container object exists under the native
+    context (state `created`, never started, dated three weeks before
+    this session, its own separate `fantasy_postgres_data` volume) —
+    left completely untouched.
+
+    174 tests passing (no backend logic changed this phase — both fixes
+    were frontend-only). `ARCHITECTURE.md`/`CLAUDE.md` updated against
+    what was actually built, closing out the core build plan through
+    Phase 20; Phase 17 (evals) and Phase 16 (reranking, reserved) remain
+    the two named, deliberately-not-yet-built items.
