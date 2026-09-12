@@ -5,6 +5,7 @@ from app.retrieval.sql_retriever import (
     country_for_symbol,
     get_instrument,
     get_latest_fundamentals,
+    get_latest_suggestions,
     get_monitored_symbols,
     get_recent_daily_bars,
     get_recent_general_news,
@@ -98,3 +99,15 @@ def test_get_recent_general_news_maps_rows_and_windows_by_lookback():
 def test_get_recent_general_news_empty():
     conn, _ = _conn_returning([])
     assert get_recent_general_news(lookback_days=3, conn=conn) == []
+
+
+def test_get_latest_suggestions_maps_rows():
+    row = (1, "AAPL", "Apple Inc.", "Strong earnings.", [10, 11], datetime(2026, 9, 12, tzinfo=timezone.utc))
+    conn, cursor = _conn_returning([row])
+    results = get_latest_suggestions(limit=5, conn=conn)
+    assert len(results) == 1
+    assert results[0].symbol == "AAPL"
+    assert results[0].source_article_ids == [10, 11]
+    sql, params = cursor.execute.call_args[0]
+    assert "ORDER BY generated_at DESC" in sql
+    assert params == (5,)

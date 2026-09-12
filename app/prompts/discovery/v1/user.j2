@@ -1,0 +1,14 @@
+{% if feedback %}
+Your previous attempt had problems the checker rejected — fix them this time:
+{{ feedback }}
+
+{% endif %}
+Recent general market news ({{ articles|length }} articles):
+
+{% for article in articles %}
+<article id="{{ article.id }}" source="{{ article.source_name }}" published_at="{{ article.published_at }}">
+{{ article.headline }}
+{{ article.summary }}
+</article>
+
+{% endfor %}

@@ -132,6 +132,16 @@ class GeneralNewsItemRow:
     published_at: Optional[datetime]
 
 
+@dataclass
+class SuggestionRow:
+    id: int
+    symbol: str
+    company_name: str
+    reasoning: str
+    source_article_ids: list
+    generated_at: datetime
+
+
 def _query(conn: Optional[psycopg.Connection], sql: str, params: tuple) -> list[tuple]:
     if conn is not None:
         with conn.cursor() as cur:
@@ -261,3 +271,16 @@ def get_recent_general_news(
         (lookback_days, limit),
     )
     return [GeneralNewsItemRow(*r) for r in rows]
+
+
+def get_latest_suggestions(limit: int = 20, conn: Optional[psycopg.Connection] = None) -> list[SuggestionRow]:
+    """The most recent suggestions, newest first — `suggestions` is
+    append-only with no scan-run grouping, so "latest N" is the whole
+    read contract (CLAUDE.md's "Extension — Discovery")."""
+    rows = _query(
+        conn,
+        "SELECT id, symbol, company_name, reasoning, source_article_ids, generated_at "
+        "FROM suggestions ORDER BY generated_at DESC LIMIT %s",
+        (limit,),
+    )
+    return [SuggestionRow(*r) for r in rows]

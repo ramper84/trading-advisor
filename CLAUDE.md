@@ -1178,3 +1178,80 @@ bounded skew (`temporal.py`'s half-life decay is measured in days, so a
 6-hour error changes a weight by a fraction of a percent); not worth a
 backfill migration for a personal tool's news-recency weighting, named
 here so it isn't rediscovered as a mystery later.
+
+### D3-D4 — done (2026-09-12): the Actor, the Critic, the Boss
+
+**Actor** (`llm_service.generate_discovery_suggestions`): same
+`instructor.from_litellm` client, `gpt-4o-mini`/Haiku-4.5 fallback pair as
+`generate_synthesis`. `DiscoverySuggestions`/`SuggestedCompany`
+(`app/schemas.py`) — `symbol`, `company_name`, `reasoning`,
+`source_article_ids`. System prompt frames the persona explicitly as an
+experienced trader triaging a feed (real catalysts, unusual coverage
+density — not "mentioned in passing"), and explicitly instructs that
+returning zero suggestions is correct when nothing clears the bar.
+
+**Critic** (`app/guardrails/discovery_guard.py`) — mostly deterministic
+code, as planned, but **one deliberate, evidence-based exception to
+"Critic is code, not a model call"**:
+1. **Citation integrity** — domain-agnostic, identical in shape to
+   `analysis_guard.check_citation_integrity`.
+2. **Symbol resolution + identity** — planned as one deterministic check
+   ("does this symbol resolve"); live verification split it into two,
+   because the deterministic half alone let a real, dangerous case
+   through: the Actor suggested `PEMEX` for Petróleos Mexicanos (a real
+   catalyst — an oil spill), and `PEMEX` resolves via `yfinance` to a
+   **real, unrelated mutual fund** ("Pioneer Emerging Markets Equity
+   Fund"). A resolved ticker being real is not the same as it being the
+   *right* company. The obvious fix — string/fuzzy-matching the claimed
+   name against the resolved name — was tried against the data first and
+   rejected: `VOLARA.MX` (correctly Volaris, confirmed live) resolves to
+   "Controladora Vuela Compañía de Aviación, S.A.B. de C.V.", which
+   shares zero substantial substrings with "Volaris" — a naive matcher
+   would have rejected a *correct* suggestion. This is exactly
+   `PLAYBOOK.md` Axis 4's own named carve-out — "reserve a model call for
+   the Critic only when the check genuinely requires judgment no rule can
+   express" — so `llm_service.verify_symbol_identity` is a real, second
+   LLM call: `SymbolIdentityVerdict` (`matches: bool`, `reason: str`),
+   using the **fallback model as its own primary** (`s11-04`'s "a
+   different, cheaper model than the generator" discipline — Haiku 4.5,
+   not `gpt-4o-mini` twice), instructed to doubt in favor of "does not
+   match". Only called once resolution already succeeded (`s10-06`'s
+   cheap-first ordering, applied to a model call instead of a vector
+   search) — never spent on a symbol that doesn't resolve at all.
+3. **Reliability-tier rule** — the same `>= 3` floor, reused as-is.
+
+**Boss** (`app/analysis/discovery.py`): calls the Actor, reviews every
+suggestion, retries once with feedback naming exactly what failed. **A
+second real bug, found live, in the retry logic itself**: the first
+version retried the *whole* Actor call whenever *any* suggestion failed,
+discarding already-passing suggestions from the first attempt. A real
+run had 2 good suggestions (`VWAGY`/Volkswagen, `NFLX`/Netflix) and 1 bad
+one (`PEMEX`) on the first attempt; the whole-batch retry threw the 2
+good ones away, and the retry's own output happened to fail too — a real
+run went from 2 useful suggestions to 0 because of the retry policy
+itself, not because of anything wrong with the original suggestions.
+Fixed: accepted suggestions now survive a retry; only the retry's *new*
+passing suggestions (deduplicated by symbol) are added to what was
+already accepted. Regression-tested with the exact real scenario.
+
+**Persistence**: `suggestions` migration (append-only, JSONB
+`source_article_ids`, no status tracking for v1) + `discovery_store.py`
+(`insert_suggestions`) + `sql_retriever.get_latest_suggestions()`.
+
+39 new tests (Actor, Critic — including both real rejection cases and
+the identity judge's fallback path, Boss — including the retry-
+preservation regression, store); 214 passing total.
+
+**Live verification (2026-09-12)**, same temporary-dev-Postgres
+discipline as every prior phase: the full Actor→Critic→Boss loop run
+repeatedly against real, freshly-ingested general news and a real
+`gpt-4o-mini`/Haiku pair. Confirmed, across several real runs: a clean
+suggestion accepted and persisted (Netflix's 15th anniversary in Mexico);
+`PEMEX` correctly rejected on two different malformed ticker attempts
+(`PEMEX.MX` — doesn't resolve at all; `PEMEX` — resolves to the wrong
+company); a run that legitimately produced zero accepted suggestions
+(Pemex genuinely has no tradeable common equity under any ticker, so the
+Actor's repeated attempts to suggest it correctly kept failing — honest
+abstention, not a bug, matching this project's own established
+abstention discipline); and the retry-preservation fix confirmed via a
+controlled unit test reproducing the exact real scenario that exposed it.

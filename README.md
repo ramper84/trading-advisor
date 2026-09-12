@@ -261,7 +261,17 @@ on a locally-run TradingView Desktop app. Both are gone, not paused — see
       not built early as scope creep.
 - [ ] Phase 16 (reranking) and Phase 17 (evals) remain — both reserved,
       not gaps; build when asked for
-- [ ] Discovery capability (`CLAUDE.md`'s "Extension — Discovery",
-      2026-09-12): a daily-scheduled Actor-Critic-Boss scan of general
-      news suggesting companies worth a look. Architecture decided,
-      build order D1-D6 specified, not yet built.
+- [x] Discovery D1-D4 (`CLAUDE.md`'s "Extension — Discovery", 2026-09-12):
+      general news ingestion, the Actor (`gpt-4o-mini`/Haiku, an
+      experienced-trader persona), the Critic (citation integrity, symbol
+      resolution, and — added live, a real gap found in testing — a
+      second LLM call verifying a resolved ticker is the *right* company,
+      not just *a* real one), the Boss (retry with feedback, accepted
+      suggestions now survive a retry after a real bug showed they
+      didn't), and persistence. 214 tests passing. Live-verified with
+      real news and real LLM calls: a correct suggestion accepted, two
+      different wrong-ticker attempts for the same company rejected, and
+      a run that correctly abstained entirely (a genuinely non-tradeable
+      company kept getting suggested and kept getting rejected). D5
+      (`refresh_worker` daily integration) and D6 (`/feeds` page)
+      remain.

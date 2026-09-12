@@ -178,8 +178,9 @@ request; `retrieval/` never touches a network source directly.
 | `services/run_recorder.py` | `config` | everything else — pure observability plumbing, importable by `ingest/*`, `retrieval/*`, and `routers/*` alike |
 | `services/db.py` | `config` | everything else — the one shared Postgres connection helper (registers the pgvector adapter), importable by `ingest/*`, `retrieval/*`, and `analysis/*` alike |
 | `services/market_data.py` | `config`, `schemas` | `routers`, `analysis`, `guardrails` |
-| `services/llm_service.py` | `config`, `schemas`, `prompts`, `analysis/synthesis.py` (the `EvidenceAggregate` it reasons over) | `routers` |
-| `guardrails/*` | `config`, `schemas`, `analysis/synthesis.py` (types only), `retrieval/sql_retriever.py` (types only), `retrieval/vector_retriever.py` (types only) | `routers`, `services/llm_service.py` — no LLM import, ever; a semantic judge (reserved, §8) would be the one exception |
+| `services/llm_service.py` | `config`, `schemas`, `prompts`, `analysis/synthesis.py` (the `EvidenceAggregate` it reasons over), `retrieval/sql_retriever.py` (types only — `GeneralNewsItemRow`, discovery's Actor input) | `routers` |
+| `guardrails/analysis_guard.py` | `config`, `schemas`, `analysis/synthesis.py` (types only), `retrieval/sql_retriever.py` (types only), `retrieval/vector_retriever.py` (types only) | `routers`, `services/llm_service.py` — no LLM import, ever (`SEMANTIC_JUDGE_ENABLED` stays reserved, off, §8 — `/analyze` has not shown the gap discovery's own semantic judge closed) |
+| `guardrails/discovery_guard.py` | `config`, `schemas`, `retrieval/sql_retriever.py` (types only), `services/market_data.py`, `services/llm_service.py` (`verify_symbol_identity` only — ADR-015's one exercised exception, not a blanket license) | `routers` |
 | `ingest/*` | `config`, `schemas`, `services/market_data.py`, `services/db.py` | `routers`, `guardrails`, `retrieval/*` |
 | `retrieval/vector_retriever.py` | `config`, `schemas`, `retrieval/hybrid_search.py`, `retrieval/temporal.py` | `ingest/*` (reads what ingest already wrote, never triggers a fetch), `routers` |
 | `retrieval/hybrid_search.py`, `retrieval/temporal.py` | `config`, `schemas` | `ingest/*`, `routers`, each other's caller role — these are called *by* `vector_retriever.py`, not by routers directly |
@@ -1093,3 +1094,57 @@ loader → parser → normalizer → (chunk → embed, for Axis-3 sources) → s
   confirmed the freshest article now lands minutes, not hours, before
   Postgres's own `now()`; `get_recent_general_news(lookback_days=0)`
   correctly returns zero rows post-fix, non-zero for `lookback_days=1`.
+
+### ADR-015 — Discovery D3-D4: the Actor-Critic-Boss loop, and two real bugs the plan didn't anticipate (2026-09-12)
+
+- **Status**: Accepted.
+- **Context**: `CLAUDE.md`'s "Extension — Discovery" section scoped the
+  Critic as deterministic code throughout, mirroring `analysis_guard.py`.
+  Building and live-testing it against real Actor output surfaced a real
+  case that deterministic code alone cannot correctly handle, plus a
+  separate, real flaw in the Boss's retry policy.
+- **Decision 1 — a deliberate, evidence-based exception to "Critic is
+  code, not a model call"**: the plan's symbol-resolution check
+  (confirm a ticker resolves via `yfinance`) is necessary but not
+  sufficient. Live testing produced a real case where a resolved ticker
+  is real but wrong: the Actor suggested `PEMEX` for Petróleos Mexicanos
+  (a real news catalyst, an oil spill), and `PEMEX` resolves to an
+  unrelated mutual fund ("Pioneer Emerging Markets Equity Fund"). A
+  string/fuzzy name-match was tried against the data before reaching for
+  a model call, and rejected on the same data: `VOLARA.MX` correctly
+  resolves to Volaris, but its resolved legal name — "Controladora Vuela
+  Compañía de Aviación, S.A.B. de C.V." — shares no substantial
+  substring with "Volaris" at all. A rule strict enough to catch the
+  Pemex case would have rejected the correct Volaris case too. This is
+  precisely `PLAYBOOK.md` Axis 4's own stated carve-out: reserve a model
+  call for the Critic only when the check genuinely requires judgment no
+  rule can express. `llm_service.verify_symbol_identity` is that one
+  exception — a narrow, binary verdict (`matches`/`reason`), using the
+  fallback model as its own primary (`s11-04`'s "a different, cheaper
+  model than the generator"), called only after the cheap deterministic
+  resolution check already passed, and instructed to doubt in favor of
+  "does not match" (the same abstention-biased instruction `s11-04`'s own
+  reference judge uses).
+- **Decision 2 — the Boss's retry must not discard already-passing
+  suggestions**: the first implementation retried the *entire* Actor call
+  whenever *any* suggestion failed the Critic. A real live run had 2
+  genuinely good suggestions (`VWAGY`/Volkswagen, `NFLX`/Netflix) and 1
+  bad one (`PEMEX`) on the first attempt; the whole-batch retry discarded
+  the 2 good ones, and the retry's own output happened to fail too — a
+  real run went from 2 useful, correct suggestions to 0, caused entirely
+  by the retry policy, not by anything wrong with the original good
+  suggestions. Fixed: accepted suggestions now survive a retry; only a
+  retry's *new* passing suggestions (deduplicated by symbol) are merged
+  in. Regression-tested by reproducing the exact scenario.
+- **Verification (2026-09-12)**: 39 new tests (Actor, Critic including
+  both real rejection modes and the identity judge's model-fallback path,
+  Boss including the retry-preservation regression, persistence); 214
+  passing total. Live, same temporary-dev-Postgres discipline as every
+  prior phase, the full loop run repeatedly with real `gpt-4o-mini`/Haiku
+  calls against real, freshly-ingested general news: a clean suggestion
+  accepted and persisted; `PEMEX` correctly rejected on two different
+  real malformed-ticker attempts; a run that correctly produced zero
+  accepted suggestions (Pemex genuinely has no tradeable common equity
+  under any ticker — the Actor's repeated attempts to suggest it kept
+  failing correctly, honest abstention per this project's own established
+  discipline, not a bug).
