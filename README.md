@@ -208,9 +208,30 @@ on a locally-run TradingView Desktop app. Both are gone, not paused — see
       that didn't match its own structured citations — harmless to the
       guardrail (the structured field is authoritative) but misleading to
       a reader; fixed with a prompt tightening. Phases 10-13 now form a
-      complete, independently-verified `/analyze` pipeline — no router or
-      `analyses`-table persistence yet, deferred to whenever a router is
-      actually needed (Phase 18's Streamlit UI, or sooner if asked for).
+      complete, independently-verified `/analyze` pipeline.
+- [x] Frontend switched from Streamlit to **Reflex** (ADR-012) —
+      explored Dash/Reflex/a React+Tremor stack, honest tradeoffs
+      compared, Reflex chosen for a modern app feel without a second
+      language for one user to maintain. A real architecture
+      simplification came with it: no separate `api` service or
+      `routers/*` layer — Reflex's own backend calls `app/*` directly.
+- [x] Phase 18 — Reflex UI: dashboard (trending), symbol detail (a real
+      Plotly-native candlestick chart), and the analyze form (citations,
+      quality flags, "add to monitor"). Closed two backend gaps that had
+      been open since Phase 1: `trending.py` and `analysis_store.py` (+
+      the `analyses` table) were never built until now. 174 backend tests
+      passing (the Reflex frontend itself has no pytest coverage of its
+      own — compiling and running it live was the verification).
+      Live-verified with a real headless browser against real
+      `AAPL` data and a real `gpt-4o-mini` call — five real bugs found by
+      actually compiling/running the app (two dynamic-route/state-var
+      name collisions, an unsupported Var operation, a Plotly prop
+      type mismatch, an untyped-Var method call), all fixed. Docker
+      packaging attempted early: one bug fixed (`unzip` missing for
+      Reflex's bundled `bun`), **one left open for Phase 19-20**: dynamic
+      routes 404 under `reflex run --env prod --single-port` in a real
+      container.
 - [ ] Phase 14-15 skipped (no agentic loop, no orchestration trigger);
       Phase 16 (reranking) reserved — next up is Phase 17 (evals) or
-      Phase 18 (Streamlit), whichever is asked for
+      Phase 19-20 (docker compose validation, including the open Reflex
+      prod-routing bug above), whichever is asked for

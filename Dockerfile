@@ -9,6 +9,9 @@ COPY app ./app
 COPY alembic.ini .
 COPY migrations ./migrations
 COPY data_catalog.yaml .
-COPY streamlit_app.py .
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# No default CMD tied to a service that no longer exists (ADR-012 drops
+# the standalone `api` service) — `migrate` and `refresh_worker`
+# (docker-compose.yml) both override `command:` explicitly. `routers/*`
+# stays a reserved capability, not something this image runs by default.
+CMD ["python", "-m", "app.ingest.refresh_worker"]

@@ -23,8 +23,8 @@ no execution, no single dependency the whole system hinges on.
 | Unstructured data | SEC EDGAR full-text search, Finnhub `/company-news`, Yahoo Finance news (`yfinance`), El Financiero + El Economista RSS (`feedparser`) | Axis 3 — see `data_catalog.yaml` for the per-source cadence/quality record. No social/community source of any kind — ADR-006 |
 | Embedding model | `text-embedding-3-small` | `PLAYBOOK.md` §4/Axis 3 default |
 | LLM access | LiteLLM (`gpt-4o-mini`, fallback a Claude Haiku model) | One wrapper, cross-provider fallback |
-| Frontend | Streamlit | Trending list, symbol detail, analyze form, monitor dashboard |
-| Deploy | docker compose (postgres, redis, api, streamlit, **refresh_worker**) | All nine sources are plain HTTPS APIs — everything is containerizable this time |
+| Frontend | **Reflex** (ADR-012, supersedes Streamlit) | Trending list, symbol detail, analyze form, monitor dashboard — pure Python, real React frontend + async FastAPI backend; event handlers call `app/*` directly, no separate API service |
+| Deploy | docker compose (postgres, redis, frontend, **refresh_worker**) | All nine sources are plain HTTPS APIs — everything is containerizable this time; no separate `api` service — Reflex's own backend serves that role (ADR-012) |
 
 **Not used, deliberately**: no vector index in v1 (Axis 3's own default —
 sequential scan until a measured latency number says otherwise), no agent
@@ -156,7 +156,13 @@ app/
 │                              contested flag, pure function, NO LLM import (Phase 12, ADR-010)
 │                     analysis_store.py — Axis 2, analyses + monitored_symbols
 ├── prompts/         analyze/v1/{system,user}.j2
-└── routers/         trending.py, symbols.py, analyze.py, monitor.py — thin HTTP only
+└── routers/         NOT built (ADR-012) — Reflex's own backend is the app server;
+                       its event handlers call app/* directly, in-process. Reserved
+                       only for a future second HTTP consumer, if one ever appears.
+
+frontend/            Reflex project (ADR-012, Phase 18) — pages/ (trending, symbol
+                       detail, analyze form, dashboard), state.py (rx.State, plumbing
+                       only — calls app/* directly, no business logic of its own)
 ```
 
 Lean tier (`PLAYBOOK.md` §3): the offline/online split
@@ -183,16 +189,19 @@ request; `retrieval/` never touches a network source directly.
 | `analysis/synthesis.py` | `config`, `schemas`, `retrieval/hybrid_search.py` (types only), `retrieval/temporal.py` (`temporal_weight`), `retrieval/vector_retriever.py` (types only) | `services/llm_service.py` — **no LLM import, ever**; `services/db.py` — pure function |
 | `analysis/analysis_store.py` | `config`, `schemas` | `routers` |
 | `prompts/*` | `schemas` | everything else |
-| `routers/*` | anything above | — (holds no business logic) |
+| `routers/*` | anything above | — not built (ADR-012); reserved for a future second HTTP consumer only |
+| `frontend/*` (Reflex) | anything under `app/*` | holds no business logic of its own — `state.py` plumbs `app/*` calls to the UI, nothing more (ADR-012) |
 | `main.py` | `config`, `routers` | — |
 
 ## 4. The conductor
 
-**N/A — Lean tier.** `routers/analyze.py` is the one path that touches both
-retrieval types, and it does so directly, in a fixed order:
+**N/A — Lean tier.** `frontend/state.py`'s analyze-page event handler is
+the one path that touches both retrieval types, and it does so directly,
+in-process (ADR-012: no `routers/analyze.py`, no HTTP hop — Reflex's own
+backend calls `app/*` in the same process), in a fixed order:
 
 ```
-routers/analyze.py
+frontend state.py: AnalyzeState.run_analysis()
  → retrieval/sql_retriever.py     (recent market_observations + past analyses)
  → retrieval/vector_retriever.py  (top-k document_chunks, threshold + soft-fail)
  → analysis/augmentation.py       (assemble one XML-delimited context, Phase 11)
@@ -208,20 +217,21 @@ only if a second, genuinely cross-capability request appears.
 
 ## 5. Request paths
 
+No HTTP routes (ADR-012) — each is a Reflex page's `on_load`/event handler
+in `frontend/state.py`, calling `app/*` directly, in-process:
+
 ```
-GET /api/v1/trending
+TrendingState.load()  (dashboard page, on_load)
  1. read monitored_symbols (active=true)                          free
  2. read latest market_observations per symbol                     free
  3. trending.rank() — deterministic % change / volume sort          free
 
-GET /api/v1/symbols/{symbol}/status
+SymbolState.load(symbol)  (symbol detail page, on_load)
  1. market_data live read (cached, FRESHNESS_BUDGET_SECONDS)         free
  2. read recent market_observations for symbol (sparkline)           free
+ 3. read analyses history for symbol, newest first                   free
 
-GET /api/v1/symbols/{symbol}/analyses
- 1. read analyses history for symbol, newest first                   free
-
-POST /api/v1/analyze
+AnalyzeState.run_analysis(symbol, query)  (analyze form submit)
  1. sql_retriever: recent market_observations, instrument reference row,   free
     latest daily_bars + fundamentals snapshot, recent analyst_ratings,
     relevant economic_indicators (country-matched: MX symbols get
@@ -242,15 +252,15 @@ POST /api/v1/analyze
     reliability-tier rule -> confidence + quality_status; insufficient
     forces stance=NEUTRAL
  7. persist analyses row                                                  free
- 8. return result (frontend shows "add to monitor")
+ 8. update state (page shows "add to monitor")
 
-POST /api/v1/monitor           {symbol, analysis_id?}
+MonitorState.add(symbol, analysis_id?)  ("add to monitor" button)
  1. upsert monitored_symbols (active=true)                            free
 
-DELETE /api/v1/monitor/{symbol}
+MonitorState.remove(symbol)  ("remove from monitor" button)
  1. set monitored_symbols.active = false                              free
 
-GET /api/v1/monitor
+MonitorState.load()  (dashboard page, on_load)
  1. read monitored_symbols (active=true) + latest observation each     free
 ```
 
@@ -260,10 +270,10 @@ loader → parser → normalizer → (chunk → embed, for Axis-3 sources) → s
 
 ## 6. Contracts that do not break
 
-- Routes: `/api/v1/trending`, `/api/v1/symbols/{symbol}/status`,
-  `/api/v1/symbols/{symbol}/analyses`, `/api/v1/analyze`,
-  `/api/v1/monitor` (GET/POST), `/api/v1/monitor/{symbol}` (DELETE),
-  `/health`.
+- Reflex pages/routes (ADR-012, no REST API): `/` (dashboard), `/symbols/{symbol}`,
+  `/analyze`, `/health` (still a plain FastAPI route — Reflex apps can mix
+  in bare API endpoints, and a liveness check has no state to plumb
+  through a page).
 - `analyses.stance` ∈ `{BULLISH, BEARISH, NEUTRAL}`, never defaulted.
 - `analyses.quality_status = "insufficient"` ⟹ `stance = NEUTRAL`, always —
   an enforced invariant checked in code, not a convention the model is
@@ -293,7 +303,8 @@ loader → parser → normalizer → (chunk → embed, for Axis-3 sources) → s
 | A prompt change | `prompts/analyze/v<N>/` — new version, not an edit |
 | A new query pattern over observation/analysis history | `retrieval/sql_retriever.py` |
 | A change to chunking/embedding strategy | `ingest/chunking.py` / `ingest/embedding.py`, plus a re-embedding pass (`articles/s11-05`) |
-| An HTTP endpoint | `routers/`, thin |
+| A new page/view | `frontend/pages/`, thin — state/event handlers in `frontend/state.py` call `app/*`, no business logic in either |
+| An HTTP endpoint (rare — a second consumer beyond the Reflex UI) | `routers/`, thin (ADR-012: not built by default) |
 
 ## 8. Reserved slots
 
@@ -827,6 +838,113 @@ loader → parser → normalizer → (chunk → embed, for Axis-3 sources) → s
   live-verified pipeline (`sql_retriever`/`vector_retriever` →
   `augmentation` → `synthesis` → `llm_service` → `analysis_guard`) with
   no code yet calling all five in sequence outside a verification script
-  — wiring that into `POST /analyze` plus `analyses`-table persistence is
-  left for whenever a router is actually needed (Phase 18's Streamlit UI,
-  or sooner if asked for explicitly), not assumed to be this phase's job.
+  — wiring that into an actual UI flow plus `analyses`-table persistence
+  is left for Phase 18's frontend (Reflex, per ADR-012 — Streamlit at the
+  time this ADR was written), or sooner if asked for explicitly, not
+  assumed to be this phase's job.
+
+### ADR-012 — Switch frontend from Streamlit to Reflex before Phase 18; drop the separate `api` service (2026-09-11)
+
+- **Status**: Accepted.
+- **Context**: before Phase 18 began, the operator asked to explore
+  alternatives to Streamlit — wanting a more modern feel and a genuinely
+  configurable dashboard with real charting, and naming Streamlit's
+  linear-script rerun model and limited layout control as the specific
+  frustration. Three alternatives were researched (current as of
+  2026-09, not from possibly-stale memory) and presented with an honest
+  cost/benefit each:
+  - **Plotly Dash**: pure Python, explicit component/callback model (no
+    full-script rerun), best native financial charting (candlestick/OHLC
+    built in, unlike a Recharts wrapper). Costs: more boilerplate than
+    Streamlit or Reflex, and no first-class drag/resize panel layout —
+    still needs a community add-on for that.
+  - **Reflex**: pure Python, compiles to a real React frontend with an
+    async FastAPI backend under the hood. Modern app feel (real
+    routing/state, no full-page reruns) without a second language for a
+    single-user tool to maintain solo. At comparison time its charting
+    looked like the real cost versus Dash — a Recharts wrapper, not
+    Plotly-native. **That turned out to be stale once actually
+    installed**: `reflex==0.9.11` ships a first-party
+    `reflex-components-plotly` package with a dedicated `PlotlyFinance`
+    component, confirmed live by importing it and building a real
+    `go.Candlestick` figure — Reflex gets genuine Plotly-native
+    candlestick/OHLC charting after all, closing most of the gap this
+    comparison originally conceded to Dash. Recorded honestly as a
+    finding that improved on verification, not assumed correct from
+    initial research.
+  - **React (Next.js) + Tremor + FastAPI**: the most modern and most
+    flexible option — Tremor (free/open-source since Vercel's 2025
+    acquisition) is purpose-built for dashboard/KPI/chart components on
+    Recharts+Tailwind, and pairing it with `react-grid-layout` gives
+    genuine user drag/resize panels, which none of the Python options
+    provide natively. Cost: a second stack (TypeScript/React) for a
+    single-user personal project to maintain alone, and it would require
+    building `routers/*` now — deliberately deferred by every phase since
+    Phase 10.
+- **Decision**: **Reflex.** For a personal, single-user tool, the modern
+  app feel and single-language maintenance burden outweighed Dash's
+  stronger native charting and React's superior configurability — both
+  real costs, not free upgrades, for a project with exactly one user.
+- **A real architecture simplification, not just a framework swap**:
+  Reflex's own backend already is a FastAPI app. Its event handlers can
+  call `app/*` pipeline modules directly, in-process — there is no need
+  for a separate `routers/*` FastAPI layer or `api` docker-compose
+  service at all for Phase 18. This is a genuine simplification versus
+  the original Streamlit-plus-separate-`api`-service design implied by
+  `CLAUDE.md`'s original tree (`docker-compose.yml` listing `api` and
+  `streamlit` as distinct services) — one fewer network hop, one fewer
+  service to run, for a single-user local deployment that never needed
+  a second HTTP consumer in the first place.
+- **Consequence**: `streamlit_app.py` and the `streamlit` dependency are
+  removed; `frontend/` (a self-contained Reflex project) replaces them.
+  `routers/*` stays unbuilt — reserved only for a future second HTTP
+  consumer, if one ever appears, not assumed necessary by default.
+  `docker-compose.yml`'s `api` service is dropped; `frontend` replaces it.
+  §2's layer map, §4's conductor diagram, and §5's request paths are
+  updated to describe Reflex event handlers instead of REST routes —
+  `GET /api/v1/trending` etc. become `TrendingState.load()` etc., called
+  from a page's `on_load`, not from an HTTP client.
+- **Verification (2026-09-11)**: two real backend gaps closed first —
+  `trending.py`, `analysis_store.py`, and the `analyses` table itself
+  were named in the tree since Phase 1 but never built (Phases 10-13
+  stayed scoped to the pure pipeline); 12 new tests. `frontend/`'s
+  `state.py` + three pages were then compiled and run for real, catching
+  five real bugs no amount of reasoning from memory of an earlier Reflex
+  version would have surfaced: two separate `DynamicRouteArgShadowsStateVarError`s
+  (a dynamic route segment's name is reserved across *every* state, not
+  just the page owning the route — even `SymbolState`'s own `symbol`
+  field collided with its own page's `[symbol]` segment), an unsupported
+  `+` between two dict-subscripted Vars, a `Plotly` component prop that
+  actually wants a full `plotly.graph_objs.Figure` rather than the
+  data/layout dict pair its prop names suggested, an `UntypedVarError`
+  from calling `.length()` on a subscripted `dict` Var (fixed by
+  flattening `AnalyzeState.result` into individual typed fields), and a
+  cosmetic confidence-display bug ("+50.00%") caught only by looking at
+  the rendered page. Driven live with a real headless browser (Playwright
+  — `chromium-cli` wasn't available in this environment) against real
+  `AAPL` data: dashboard, symbol detail (a real, correctly-colored
+  candlestick chart), and a full real `gpt-4o-mini` analyze run with
+  persistence and citations, plus the input-relevance guard correctly
+  blocking an execution-shaped query. Zero browser console errors.
+  `fantasy-postgres-1`'s own daemon (Docker Desktop) was down in this
+  environment for unrelated reasons — confirmed via a failed `docker ps`,
+  not assumed — so a separate, already-running native `dockerd` was used
+  for all verification instead, with zero interaction with
+  `fantasy-postgres-1` either way.
+- **Docker containerization, attempted ahead of Phase 19-20's own
+  scheduled validation**: `frontend/Dockerfile` (Reflex needs Node.js —
+  a separate Dockerfile from the root Python-only one) and
+  `docker-compose.yml` updated to this ADR's topology, including a new
+  one-shot `migrate` service — `frontend` depending only on postgres
+  *health* left a real startup race against the schema not existing yet,
+  closed via `service_completed_successfully`. One real bug found and
+  fixed: Reflex's `bun` installer needs `unzip`, undocumented, surfaced
+  only by the container's own `SystemPackageMissingError`. **One real bug
+  found and left open, explicitly for Phase 19-20**: dynamic routes
+  (`/symbols/[symbol]`) 404 under `reflex run --env prod --single-port`
+  in an actual running container (confirmed reproducible; `--single-port`
+  is mandatory in prod mode, so there is no separate-ports workaround) —
+  static routes (`/`, `/analyze`) serve fine, root cause not yet
+  identified. This is a production-container-serving gap, not a defect in
+  the UI itself, which is fully built and live-verified via `reflex run`.
+  `docker compose up` is not considered validated until this is resolved.

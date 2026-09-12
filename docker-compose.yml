@@ -1,36 +1,4 @@
 services:
-  api:
-    build: .
-    container_name: trading-advisor-api
-    ports:
-      - "8000:8000"
-    env_file:
-      - .env
-    environment:
-      REDIS_URL: redis://redis:6379
-      DATABASE_URL: postgresql+psycopg://trading-advisor:trading-advisor@postgres:5432/trading-advisor
-    depends_on:
-      redis:
-        condition: service_healthy
-      postgres:
-        condition: service_healthy
-    volumes:
-      - ./app:/app/app
-      - ./tests:/app/tests
-      - ./data_catalog.yaml:/app/data_catalog.yaml
-      - ./migrations:/app/migrations
-      - ./alembic.ini:/app/alembic.ini
-    command: >
-      sh -c "alembic upgrade head &&
-             uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
-      interval: 30s
-      timeout: 5s
-      start_period: 30s
-      retries: 3
-
   redis:
     image: redis:7-alpine
     container_name: trading-advisor-redis
@@ -63,21 +31,62 @@ services:
       retries: 5
     restart: unless-stopped
 
-  frontend:
+  # One-shot: runs migrations then exits. Both frontend and refresh_worker
+  # depend on it completing successfully — without this, frontend only
+  # waited on postgres being healthy, not on the schema actually existing
+  # yet, a real startup race with no clean fix short of a dedicated service.
+  migrate:
     build: .
+    container_name: trading-advisor-migrate
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://trading-advisor:trading-advisor@postgres:5432/trading-advisor
+    volumes:
+      - ./migrations:/app/migrations
+      - ./alembic.ini:/app/alembic.ini
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  # No separate `api` service (ADR-012): Reflex's own backend is the app
+  # server. `frontend`'s event handlers call app/* pipeline modules
+  # directly, in-process — no HTTP hop, no routers/* layer.
+  #
+  # KNOWN OPEN ISSUE (found during a preliminary Docker check ahead of
+  # Phase 19-20's own "docker compose up" validation, not yet resolved):
+  # dynamic routes (/symbols/[symbol]) 404 under `reflex run --env prod
+  # --single-port` — reproduced directly against a real container; static
+  # routes (/, /analyze) serve fine. Root cause not yet identified (a
+  # `reflex export`/static-serving limitation with dynamic segments is
+  # suspected, not confirmed). The app is fully built and verified via
+  # `reflex run` (plain dev server) — this is a prod-container-serving
+  # gap, not a Phase 18 UI defect. Resolve before considering Phase 19-20
+  # done.
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
     container_name: trading-advisor-frontend
     env_file:
       - .env
     environment:
-      API_BASE_URL: http://api:8000
-    command: ["streamlit", "run", "streamlit_app.py", "--server.address=0.0.0.0", "--server.port=8501"]
-    volumes:
-      - ./streamlit_app.py:/app/streamlit_app.py
+      DATABASE_URL: postgresql+psycopg://trading-advisor:trading-advisor@postgres:5432/trading-advisor
+      REDIS_URL: redis://redis:6379
     ports:
-      - "8501:8501"
+      - "8000:8000"
     depends_on:
-      - api
+      migrate:
+        condition: service_completed_successfully
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/ping')"]
+      interval: 30s
+      timeout: 5s
+      start_period: 60s
+      retries: 3
 
   refresh_worker:
     build: .
@@ -92,8 +101,8 @@ services:
       - ./data_catalog.yaml:/app/data_catalog.yaml
     command: ["python", "-m", "app.ingest.refresh_worker"]
     depends_on:
-      postgres:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     restart: unless-stopped
 
 volumes:

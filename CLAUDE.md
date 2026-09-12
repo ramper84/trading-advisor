@@ -153,6 +153,41 @@ persisted. Findings and the resulting scope: full record in
   column on `monitored_symbols` (a personal one-line note on *why* a
   symbol is being watched) is added since it doesn't reopen that decision.
 
+### ADR — switch frontend from Streamlit to Reflex (2026-09-11)
+
+Before Phase 18 began, the operator asked to explore alternatives to
+Streamlit for a more modern, configurable dashboard with real charting —
+Streamlit's linear-script rerun model and limited layout control were the
+stated concerns. Three alternatives were researched and compared (Plotly
+Dash, Reflex, a full React+Tremor+FastAPI stack); full record in
+`ARCHITECTURE.md`'s ADR-012. Summary:
+
+- **Chosen: Reflex.** Pure Python, compiles to a real React frontend with
+  an async FastAPI backend under the hood — a modern app feel (real
+  routing/state, no full-page reruns) without taking on a second language
+  for a single-user tool to maintain. Charting looked like the real cost
+  versus Dash at comparison time (a Recharts wrapper, not Plotly-native)
+  — confirmed stale once actually installed: `reflex==0.9.11` ships a
+  first-party `reflex-components-plotly` package with a `PlotlyFinance`
+  component, live-confirmed by building a real `go.Candlestick` figure.
+  Genuine Plotly-native candlestick charting, not a trade-off after all.
+- **Considered and not chosen**: Plotly Dash (more mature, better native
+  financial charting, but more boilerplate and still no first-class
+  drag/resize layout). A full React+Tremor+`react-grid-layout` stack (the
+  most flexible, genuine drag/resize panels, but a second stack — real
+  ongoing maintenance cost for one user — and it would require building
+  `routers/*` now, which every phase since Phase 10 has deliberately
+  deferred).
+- **A real architecture simplification, not just a swap**: Reflex's own
+  backend already is a FastAPI app, so its event handlers call `app/*`
+  pipeline modules directly, in-process — no separate `api` service, no
+  `routers/*` layer at all for Phase 18. `docker-compose.yml`'s `api`
+  service is dropped; `frontend` replaces it.
+- **Consequence**: `streamlit_app.py` and the `streamlit` dependency are
+  gone; `frontend/` (a self-contained Reflex project) replaces them.
+  `routers/*` stays unbuilt, reserved only for a future second HTTP
+  consumer, if one ever appears.
+
 ## 3. Project tier and structure
 
 **Lean**, still — one retrieval architecture that now has two retrieval
@@ -208,19 +243,24 @@ trading-advisor/
 │   │   └── analysis_store.py        # Axis 2: analyses + monitored_symbols read/write
 │   ├── prompts/
 │   │   └── analyze/v1/{system,user}.j2
-│   └── routers/
-│       ├── trending.py              # GET /trending
-│       ├── symbols.py               # GET /symbols/{symbol}/status, GET /symbols/{symbol}/analyses
-│       ├── analyze.py               # POST /analyze
-│       └── monitor.py               # GET/POST /monitor, DELETE /monitor/{symbol}
+│   └── routers/                     # NOT built (ADR-012) — Reflex's own backend is the app
+│                                    #   server; its event handlers call app/* directly,
+│                                    #   in-process. Reserved only for a future second HTTP
+│                                    #   consumer, if one ever appears.
 ├── migrations/                      # Alembic; market_observations, instruments, daily_bars, fundamentals,
 │                                    #   analyst_ratings, economic_indicators, analyses, monitored_symbols, document_chunks
 ├── evals/
 │   ├── golden_queries.json          # seeded from README.md §2a; must include an abstention case AND a contradiction case (s11-06)
 │   └── measure_retrieval.py         # artisanal precision@k harness (s10-02) — decides IF/WHEN reranking (Phase 16) earns its place
 ├── tests/
-├── streamlit_app.py
-├── docker-compose.yml               # postgres(+pgvector), redis, api, streamlit, refresh_worker — all containerized now
+├── frontend/                        # Reflex app (ADR-012) — event handlers call app/* pipeline
+│   │                                #   modules directly, in-process; no separate API hop
+│   ├── rxconfig.py
+│   └── frontend/
+│       ├── frontend.py              # rx.App, page registration
+│       ├── state.py                 # rx.State subclasses — one per page, plumbing only
+│       └── pages/                   # trending, symbol detail, analyze form, dashboard
+├── docker-compose.yml               # postgres(+pgvector), redis, frontend, refresh_worker — all containerized now
 ├── Dockerfile
 ├── .env.example
 ├── ARCHITECTURE.md
@@ -247,15 +287,15 @@ above) — no host-native deployment wrinkle this time.
 | LLM access | LiteLLM + Instructor, `gpt-4o-mini` primary / a Claude Haiku fallback | `PLAYBOOK.md` §4 default |
 | Prompts | Jinja2, versioned (`prompts/analyze/v1/`) | standard convention |
 | Structured output | Instructor | `stance` (`BULLISH`/`BEARISH`/`NEUTRAL`) + confidence + rationale + per-claim citations, validated schema |
-| Frontend | Streamlit | trending list, symbol detail, analyze form, dashboard |
-| Local deployment | `docker compose`: postgres, redis, api, streamlit, **refresh_worker** | All nine sources are plain HTTPS APIs — no host-native deployment constraint this time (contrast the retired TradingView-only architecture) |
+| Frontend | **Reflex** (ADR-012, supersedes Streamlit) | trending list, symbol detail, analyze form, dashboard — pure Python, compiles to a real React frontend + async FastAPI backend; event handlers call `app/*` pipeline modules directly, no separate API service |
+| Local deployment | `docker compose`: postgres, redis, frontend, **refresh_worker** | All nine sources are plain HTTPS APIs — no host-native deployment constraint this time (contrast the retired TradingView-only architecture); no separate `api` service — Reflex's own backend serves that role (ADR-012) |
 
 ## 5. Common commands
 
 ```bash
-docker compose up --build      # postgres(+pgvector) + redis + api + streamlit + refresh_worker
+docker compose up --build      # postgres(+pgvector) + redis + frontend (Reflex) + refresh_worker
 pytest                         # unit tests — no LLM, embedding, or network calls
-streamlit run streamlit_app.py # if run outside compose
+reflex run                     # from frontend/, if run outside compose
 ```
 
 ## 6. Configuration
@@ -761,10 +801,100 @@ phases the prior architecture skipped:
     it; not adopted now — the artisanal harness is deliberately the
     cheaper, sufficient tool for the decisions this project actually needs
     to make at its current scale.
-16. **Phase 18** — Streamlit: trending, symbol detail, analyze form
-    (showing per-claim citations with their reliability tier and the
-    `contested`/`quality_status` flags), dashboard.
+16. **Phase 18** — Reflex (ADR-012, supersedes Streamlit): trending,
+    symbol detail, analyze form (showing per-claim citations with their
+    reliability tier and the `contested`/`quality_status` flags),
+    dashboard. Event handlers call `app/*` pipeline modules directly, in
+    process — no `routers/*` FastAPI layer, since Reflex's own backend
+    already serves that role and a second HTTP hop would be pure overhead
+    for a single-user tool.
+
+    **Done (2026-09-11).** Two real backend gaps surfaced immediately:
+    `trending.py` and `analysis_store.py` (plus the `analyses` table
+    itself) were named in CLAUDE.md's own tree since Phase 1 but never
+    built — Phases 10-13 stayed scoped to the pure `/analyze` pipeline and
+    explicitly deferred persistence each time. Built now: the `analyses`
+    migration (citations/resolved/dangling/ungrounded_figures as JSONB,
+    `s08-04`'s schema-split rule — typed columns for what's queried by,
+    JSONB for what's read back whole), `analysis_store.py` (`insert_analysis`
+    persists the GUARDED result, never the model's raw self-report;
+    `add_to_monitor`/`remove_from_monitor`, soft-delete only), `trending.py`
+    (ranks by absolute `%` change, deterministic, no LLM import, matching
+    `technical_indicators.py`'s own rule). 12 new tests.
+
+    `frontend/` (Reflex): `state.py` (plumbing only — every event handler
+    calls straight into `app/*`, per ADR-012's dependency rule),
+    `pages/{dashboard,symbol_detail,analyze}.py`. Blocking calls
+    (Postgres, the LLM call) run via `asyncio.to_thread` inside
+    `@rx.event(background=True)` handlers so a slow `/analyze` request
+    doesn't freeze the app for other pages. A real candlestick chart
+    (`reflex_components_plotly`'s `PlotlyFinance`/`Plotly` component,
+    confirmed genuinely Plotly-native — see ADR-012) renders `daily_bars`
+    on the symbol detail page.
+
+    **Five real bugs found only by actually compiling/running the app —
+    none guessable from memory of an earlier Reflex version:**
+    - `DynamicRouteArgShadowsStateVarError` (twice): a dynamic route
+      segment's name (`symbol` on `/symbols/[symbol]`) is reserved across
+      *every* state, not just the page's own — `AnalyzeState.symbol` and
+      even `SymbolState.symbol` (the page's own state!) both had to be
+      renamed (`symbol_input`, `current_symbol`).
+    - Plain Python `+` is unsupported between two dict-subscripted Vars
+      (`ObjectItemOperation`) in this Reflex version — fixed by rendering
+      separate text nodes instead of concatenating strings.
+    - `reflex_components_plotly.Plotly`'s `data` prop expects a real
+      `plotly.graph_objs.Figure` object, not a plain data/layout dict
+      pair — the natural-looking guess from the component's own prop
+      names was wrong; the actual `TypeError` named the expected type.
+    - Calling `.length()` on a subscripted `dict`-typed Var raises
+      `UntypedVarError` (subscripting loses type information to
+      `typing.Any`) — fixed by flattening `AnalyzeState.result` into
+      individual typed fields instead of one nested dict blob.
+    - A cosmetic bug caught only by actually looking at the rendered
+      page, not by compiling: confidence showed as "+50.00%" — the same
+      `_pct` formatter used for price *change* (where a leading "+"
+      correctly means "up from a baseline") was reused for confidence
+      (a plain magnitude with no baseline to be "up" from). Fixed with a
+      separate `_pct_plain` formatter; re-verified live.
+
+    **Live verification (2026-09-11)**, same temporary-dev-Postgres
+    discipline as Phases 9-13 (`fantasy-postgres-1`'s daemon was down in
+    this environment for unrelated reasons — confirmed via `docker ps`
+    failing entirely, not proceeding on an assumption — so a separate,
+    already-running native `dockerd` was used instead, zero interaction
+    with `fantasy-postgres-1` either way): driven with a real headless
+    browser (Playwright; `chromium-cli` wasn't available in this
+    environment), not just `curl`, against real `AAPL` data. Confirmed:
+    the dashboard shows the real price/change/volume; the symbol detail
+    page renders a real, correctly-colored candlestick chart from real
+    `daily_bars`; the analyze form completed a real `gpt-4o-mini` call
+    end to end, persisted the result via the new `analysis_store.py`, and
+    displayed real citations; the input-relevance guard correctly
+    blocked "Buy me 10 shares of AAPL" with the right out-of-scope
+    message. Zero browser console errors across all three pages.
+
+    **Docker containerization was also attempted** (`frontend/Dockerfile`,
+    `docker-compose.yml` updated to ADR-012's topology — no `api` service,
+    a new one-shot `migrate` service both `frontend` and `refresh_worker`
+    depend on via `service_completed_successfully`, since `frontend` only
+    waiting on postgres *health* — not on the schema actually
+    existing — was a real startup race). One real bug found and fixed:
+    Reflex's own `bun` installer needs `unzip`, not obviously so from its
+    docs, only from the container's own `SystemPackageMissingError`. One
+    real bug found and left **open, for Phase 19-20**: dynamic routes
+    (`/symbols/[symbol]`) 404 under `reflex run --env prod --single-port`
+    in an actual running container — static routes (`/`, `/analyze`)
+    serve fine; root cause not yet identified. This is a
+    production-container-serving gap, not a Phase 18 UI defect — the UI
+    itself is fully built and live-verified via `reflex run`'s plain dev
+    server above. Full `docker compose up` validation remains Phase
+    19-20's explicit, separate job per its own line below, not assumed
+    done here.
 17. **Phase 19-20** — local validation (`docker compose up`, golden set,
     confirm no directional stance is ever backed by a low-reliability
     citation alone and at least one golden-set case actually abstains);
-    finalize `ARCHITECTURE.md` against what was actually built.
+    finalize `ARCHITECTURE.md` against what was actually built. **Must
+    resolve Phase 18's known open item first**: dynamic routes 404 under
+    `reflex run --env prod --single-port` in a real container — `docker
+    compose up` cannot be considered validated while `/symbols/{symbol}`
+    doesn't actually serve.
