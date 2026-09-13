@@ -261,17 +261,19 @@ on a locally-run TradingView Desktop app. Both are gone, not paused — see
       not built early as scope creep.
 - [ ] Phase 16 (reranking) and Phase 17 (evals) remain — both reserved,
       not gaps; build when asked for
-- [x] Discovery D1-D4 (`CLAUDE.md`'s "Extension — Discovery", 2026-09-12):
+- [x] Discovery D1-D5 (`CLAUDE.md`'s "Extension — Discovery", 2026-09-13):
       general news ingestion, the Actor (`gpt-4o-mini`/Haiku, an
       experienced-trader persona), the Critic (citation integrity, symbol
       resolution, and — added live, a real gap found in testing — a
       second LLM call verifying a resolved ticker is the *right* company,
       not just *a* real one), the Boss (retry with feedback, accepted
       suggestions now survive a retry after a real bug showed they
-      didn't), and persistence. 214 tests passing. Live-verified with
-      real news and real LLM calls: a correct suggestion accepted, two
-      different wrong-ticker attempts for the same company rejected, and
-      a run that correctly abstained entirely (a genuinely non-tradeable
-      company kept getting suggested and kept getting rejected). D5
-      (`refresh_worker` daily integration) and D6 (`/feeds` page)
-      remain.
+      didn't), persistence, and a daily `refresh_worker` job that runs
+      regardless of whether any symbol is monitored yet. 218 tests
+      passing. Live-verified with real news and real LLM calls: a correct
+      suggestion accepted, wrong-ticker attempts (including one that
+      surfaced organically through `refresh_worker` itself, not staged)
+      rejected, a run that correctly abstained entirely, and
+      `refresh_worker.run_once()` confirmed to dispatch discovery with
+      zero monitored symbols while correctly respecting its own 24-hour
+      cadence on a second, immediate call. D6 (`/feeds` page) remains.

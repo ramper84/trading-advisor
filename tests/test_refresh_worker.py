@@ -9,6 +9,10 @@ from app.ingest.catalog import load_catalog
 
 CATALOG_PATH = Path(__file__).resolve().parent.parent / "data_catalog.yaml"
 
+# Captured before the autouse fixture below neutralizes the module attribute,
+# so the orchestration test can restore and exercise the real function.
+_REAL_RUN_DISCOVERY_SCAN = refresh_worker.run_discovery_scan
+
 
 def _make_fake_conn(symbols: list[str], instrument_exists: bool = True) -> MagicMock:
     conn = MagicMock()
@@ -26,11 +30,21 @@ def _neutralize_all_dispatchers(monkeypatch):
     """run_once iterates every included catalog source; without this, a
     test exercising one dispatcher would also fire real network calls for
     every other source (Finnhub, EDGAR, yfinance, RSS, FRED, Banxico) —
-    violating this project's own "no network calls in tests" rule."""
+    violating this project's own "no network calls in tests" rule.
+
+    `run_discovery_scan` is neutralized here too — a real bug found while
+    building it (2026-09-12): `run_once` now calls it unconditionally
+    (discovery runs regardless of monitored symbols), and it was NOT
+    covered by this fixture, so every existing test calling `run_once`
+    was silently making two real, unmocked RSS fetches to
+    elfinanciero_news/el_economista_news before failing later at a
+    MagicMock-cursor DB read (caught by `run_once`'s own try/except, so
+    no test failed — but the network calls still happened, every run)."""
     for name in list(refresh_worker._PER_SYMBOL_REFRESH):
         monkeypatch.setitem(refresh_worker._PER_SYMBOL_REFRESH, name, lambda *a, **k: None)
     monkeypatch.setattr(refresh_worker, "refresh_economic_data", lambda *a, **k: None)
     monkeypatch.setattr(refresh_worker, "refresh_instrument_if_new", lambda *a, **k: None)
+    monkeypatch.setattr(refresh_worker, "run_discovery_scan", lambda *a, **k: None)
 
 
 def test_run_once_does_nothing_with_no_monitored_symbols(monkeypatch):
@@ -200,6 +214,102 @@ def test_refresh_filings_bounds_fetch_by_latest_ingested_date(monkeypatch):
     refresh_worker.refresh_filings("AAPL", source, conn=MagicMock())
 
     assert captured["since"] == latest
+
+
+def test_run_once_calls_discovery_scan_even_with_no_monitored_symbols(monkeypatch):
+    """Discovery's whole point is helping a user go from zero monitored
+    symbols to their first few, so it must not be gated behind the
+    per-symbol refresh loop the way every other dispatcher legitimately
+    is (CLAUDE.md's "Extension — Discovery")."""
+    catalog = load_catalog(CATALOG_PATH)
+    conn = _make_fake_conn([])
+    monkeypatch.setattr(refresh_worker, "get_connection", lambda: conn)
+
+    discovery_calls = []
+    monkeypatch.setattr(refresh_worker, "run_discovery_scan", lambda c, conn: discovery_calls.append(True))
+
+    refresh_worker.run_once(catalog, {})
+
+    assert discovery_calls == [True]
+
+
+def test_run_once_skips_discovery_scan_before_its_cadence_elapses(monkeypatch):
+    catalog = load_catalog(CATALOG_PATH)
+    conn = _make_fake_conn(["AAPL"])
+    monkeypatch.setattr(refresh_worker, "get_connection", lambda: conn)
+
+    discovery_calls = []
+    monkeypatch.setattr(refresh_worker, "run_discovery_scan", lambda c, conn: discovery_calls.append(True))
+
+    last_run = {refresh_worker._DISCOVERY_JOB_NAME: time.monotonic()}  # just ran
+    refresh_worker.run_once(catalog, last_run)
+
+    assert discovery_calls == []
+
+
+def test_run_once_reruns_discovery_scan_once_cadence_elapses(monkeypatch):
+    catalog = load_catalog(CATALOG_PATH)
+    conn = _make_fake_conn(["AAPL"])
+    monkeypatch.setattr(refresh_worker, "get_connection", lambda: conn)
+
+    discovery_calls = []
+    monkeypatch.setattr(refresh_worker, "run_discovery_scan", lambda c, conn: discovery_calls.append(True))
+
+    stale = time.monotonic() - refresh_worker.DISCOVERY_SCAN_INTERVAL_SECONDS - 1
+    last_run = {refresh_worker._DISCOVERY_JOB_NAME: stale}
+    refresh_worker.run_once(catalog, last_run)
+
+    assert discovery_calls == [True]
+    assert last_run[refresh_worker._DISCOVERY_JOB_NAME] > stale
+
+
+def test_run_discovery_scan_orchestrates_ingest_then_scan_then_persist(monkeypatch):
+    """The autouse fixture neutralizes run_discovery_scan for every other
+    test in this module — restore the real function here since this test
+    exists specifically to exercise its own internal orchestration."""
+    monkeypatch.setattr(refresh_worker, "run_discovery_scan", _REAL_RUN_DISCOVERY_SCAN)
+    catalog = load_catalog(CATALOG_PATH)
+    conn = MagicMock()
+
+    fetch_calls = []
+    monkeypatch.setattr(
+        refresh_worker.rss_parser, "fetch_rss_feed", lambda location: fetch_calls.append(location) or "FEED"
+    )
+
+    parse_calls = []
+
+    def fake_parse_rss_general(feed, source_name):
+        parse_calls.append(source_name)
+        return [f"article-from-{source_name}"]
+
+    monkeypatch.setattr(refresh_worker.rss_parser, "parse_rss_general", fake_parse_rss_general)
+
+    upsert_calls = []
+    monkeypatch.setattr(
+        refresh_worker,
+        "upsert_general_news",
+        lambda articles, reliability_tier, conn=None: upsert_calls.append((tuple(articles), reliability_tier)),
+    )
+
+    monkeypatch.setattr(refresh_worker, "get_recent_general_news", lambda lookback_days, conn=None: ["recent-1", "recent-2"])
+
+    run_discovery_calls = []
+    monkeypatch.setattr(
+        refresh_worker, "run_discovery", lambda articles: run_discovery_calls.append(articles) or ["accepted-1"]
+    )
+
+    insert_calls = []
+    monkeypatch.setattr(
+        refresh_worker, "insert_suggestions", lambda suggestions, conn=None: insert_calls.append(suggestions)
+    )
+
+    refresh_worker.run_discovery_scan(catalog, conn)
+
+    assert parse_calls == list(refresh_worker._DISCOVERY_RSS_SOURCES)
+    assert len(fetch_calls) == len(refresh_worker._DISCOVERY_RSS_SOURCES)
+    assert len(upsert_calls) == len(refresh_worker._DISCOVERY_RSS_SOURCES)
+    assert run_discovery_calls == [["recent-1", "recent-2"]]
+    assert insert_calls == [["accepted-1"]]
 
 
 def test_refresh_filings_passes_none_since_on_first_ingest(monkeypatch):

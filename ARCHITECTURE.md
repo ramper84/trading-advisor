@@ -1148,3 +1148,71 @@ loader → parser → normalizer → (chunk → embed, for Axis-3 sources) → s
   under any ticker — the Actor's repeated attempts to suggest it kept
   failing correctly, honest abstention per this project's own established
   discipline, not a bug).
+
+### ADR-016 — Discovery D5: `refresh_worker` integration; discovery must not be gated behind having monitored symbols (2026-09-13)
+
+- **Status**: Accepted.
+- **Context**: Discovery's whole purpose is helping an operator go from
+  zero monitored symbols to their first few, but `run_once` early-returned
+  entirely when `get_monitored_symbols` came back empty — correct for
+  every existing per-symbol dispatcher (nothing to refresh for symbols
+  that don't exist yet), wrong for a symbol-independent job whose value is
+  highest precisely when the monitor list is empty.
+- **Decision**: restructured `run_once` so the zero-symbols early return
+  only skips the per-symbol instrument-refresh loop and per-symbol
+  dispatch; `_ECONOMIC_SOURCES` handling (already economy-wide) and the
+  new `run_discovery_scan` job both run unconditionally, gated only by
+  their own cadence — `DISCOVERY_SCAN_INTERVAL_SECONDS = 86400`, a
+  worker-file constant (`_DISCOVERY_JOB_NAME`'s own `last_run` entry),
+  matching `economic_indicators`'s own "economy-wide, one fetch"
+  precedent rather than any per-symbol catalog cadence. This is a real
+  behavior change to previously-shipped code, not scope creep confined to
+  new files — the narrower alternative (special-casing discovery only)
+  would leave the same "cannot bootstrap from zero" gate latent for any
+  future economy-wide job.
+- **A real test-hygiene bug this surfaced, caught before it reached live
+  infrastructure**: `_neutralize_all_dispatchers`
+  (`tests/test_refresh_worker.py`'s autouse fixture) predates
+  `run_discovery_scan` and didn't cover it. Once `run_once` called it
+  unconditionally, all 11 pre-existing tests exercising `run_once` were
+  silently making two real, unmocked RSS network calls per test run —
+  masked entirely because the resulting failure (iterating a
+  `MagicMock`-backed fake cursor's rows inside `get_recent_general_news`)
+  was swallowed by `run_once`'s own broad `except Exception` around the
+  discovery call, so no test ever went red. Found by reasoning about the
+  new unconditional call path before running anything against real
+  infrastructure, not by a failing assertion. Fixed by adding
+  `run_discovery_scan` to the fixture's patch list, with the finding
+  itself recorded in the fixture's own docstring so it isn't
+  rediscovered blind later.
+- **A related test-authoring wrinkle**: the dedicated orchestration test
+  for `run_discovery_scan` itself needs the *real* function, but the
+  fixture above neutralizes it for every test in the module by default.
+  Solved by capturing a reference to the real function at module import
+  time (before any fixture runs) and having that one test explicitly
+  restore it via `monkeypatch.setattr` before calling it — the fixture's
+  patch and the test's restoration are both ordinary `monkeypatch` calls,
+  so pytest's normal teardown still un-does both correctly after the
+  test.
+- **Verification (2026-09-13)**: 4 new tests (zero-symbols dispatch, the
+  cadence gate holding then releasing, direct orchestration); 218 passing
+  total. Live, same temporary-dev-Postgres discipline as every prior
+  phase (`trading-advisor-dev-pg` on port 5433; confirmed via `docker ps`/
+  `docker ps -a` before and after that the previously-documented dormant
+  `fantasy-postgres-1` object stayed in its `Created`, never-started
+  state throughout): `run_discovery_scan` called directly with zero
+  monitored symbols ingested 200 real articles and completed a real
+  Actor + Haiku-identity-judge call without error (zero suggestions
+  accepted that run — an honest abstention, not a defect). Then
+  `refresh_worker.run_once()` itself was run twice back-to-back: the
+  first call correctly dispatched discovery with zero monitored symbols
+  (confirming the restructured early-return, not just the isolated
+  function call above); the second, immediate call correctly skipped
+  discovery (the cadence gate holding). That second real run produced,
+  organically rather than staged, both a malformed-symbol rejection
+  (`PMEX`, a real 404 from Yahoo, correctly caught by the Critic's
+  resolution check) and one real accepted-and-persisted suggestion
+  (Oracle, citing Larry Ellison's canceled share-sale plan) — confirming
+  the full ingest→Actor→Critic→Boss→persist cycle through the actual
+  `refresh_worker` code path, not just D3-D4's earlier direct-function
+  verification of the same underlying calls.

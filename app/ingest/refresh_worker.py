@@ -18,6 +18,8 @@ from datetime import datetime, timedelta, timezone
 
 import psycopg
 
+from app.analysis.discovery import run_discovery
+from app.analysis.discovery_store import insert_suggestions
 from app.config import get_settings
 from app.ingest.analyst_rating_store import insert_analyst_ratings
 from app.ingest.catalog import CatalogSource, DataCatalog, load_catalog
@@ -25,6 +27,7 @@ from app.ingest.daily_bar_store import upsert_daily_bars
 from app.ingest.economic_indicator_store import upsert_economic_observations
 from app.ingest.embedding import embed_and_store
 from app.ingest.fundamentals_store import upsert_fundamentals
+from app.ingest.general_news_store import upsert_general_news
 from app.ingest.instrument_store import upsert_instrument
 from app.ingest.normalizers import canonical
 from app.ingest.observation_store import insert_observations
@@ -39,6 +42,7 @@ from app.ingest.parsers import (
     quotes_parser,
     rss_parser,
 )
+from app.retrieval.sql_retriever import get_recent_general_news
 from app.services import market_data
 from app.services.db import get_connection
 
@@ -75,6 +79,16 @@ BANXICO_SERIES = {
     "SF43718": "Tipo de cambio FIX (USD/MXN)",
     "SP30578": "INPC variación anual (Annual Inflation Rate)",
 }
+
+# Discovery (CLAUDE.md's "Extension — Discovery", D5): both RSS sources'
+# *general* feed content, reused independently of their per-symbol
+# keyword-filtered ingestion above. A worker-file constant, matching
+# FRED_LOOKBACK_DAYS's own precedent, not a Settings field — not
+# operator-tunable, just an implementation choice.
+_DISCOVERY_JOB_NAME = "discovery_scan"
+_DISCOVERY_RSS_SOURCES = ("elfinanciero_news", "el_economista_news")
+DISCOVERY_SCAN_INTERVAL_SECONDS = 86400  # once daily
+DISCOVERY_LOOKBACK_DAYS = 2
 
 
 def get_monitored_symbols(conn: psycopg.Connection) -> list[str]:
@@ -239,20 +253,41 @@ _PER_SYMBOL_REFRESH = {
 }
 
 
+def run_discovery_scan(catalog: DataCatalog, conn: psycopg.Connection) -> None:
+    """Discovery's own daily job (`CLAUDE.md`'s "Extension — Discovery",
+    D5) — symbol-independent, its own cadence, not tied to any single
+    `data_catalog.yaml` source's own `refresh.interval_seconds`: this
+    reuses the RSS sources' *general* feed content (`parse_rss_general`),
+    not their per-symbol keyword-filtered ingestion (`refresh_rss_news`).
+    """
+    for source_name in _DISCOVERY_RSS_SOURCES:
+        source = catalog.get(source_name)
+        feed = rss_parser.fetch_rss_feed(source.location)
+        articles = rss_parser.parse_rss_general(feed, source_name=source_name)
+        upsert_general_news(articles, reliability_tier=source.reliability_tier, conn=conn)
+
+    recent = get_recent_general_news(DISCOVERY_LOOKBACK_DAYS, conn=conn)
+    accepted = run_discovery(recent)
+    insert_suggestions(accepted, conn=conn)
+    logger.info(
+        "discovery_scan_completed",
+        extra={"articles_considered": len(recent), "suggestions_accepted": len(accepted)},
+    )
+
+
 def run_once(catalog: DataCatalog, last_run: dict[str, float]) -> None:
     now = time.monotonic()
     with get_connection() as conn:
         symbols = get_monitored_symbols(conn)
         if not symbols:
-            logger.info("no monitored symbols yet, nothing to refresh")
-            return
-
-        yfinance_quotes_source = catalog.get("yfinance_quotes")
-        for symbol in symbols:
-            try:
-                refresh_instrument_if_new(symbol, yfinance_quotes_source, conn)
-            except Exception:
-                logger.exception("instrument refresh failed", extra={"symbol": symbol})
+            logger.info("no monitored symbols yet, skipping per-symbol refresh")
+        else:
+            yfinance_quotes_source = catalog.get("yfinance_quotes")
+            for symbol in symbols:
+                try:
+                    refresh_instrument_if_new(symbol, yfinance_quotes_source, conn)
+                except Exception:
+                    logger.exception("instrument refresh failed", extra={"symbol": symbol})
 
         for source in catalog.included_sources():
             last_run_at = last_run.get(source.name)
@@ -273,6 +308,9 @@ def run_once(catalog: DataCatalog, last_run: dict[str, float]) -> None:
                 last_run[source.name] = now
                 continue
 
+            if not symbols:
+                continue  # every remaining dispatcher is per-symbol; nothing to do without one
+
             refresh_fn = _PER_SYMBOL_REFRESH.get(source.name)
             if refresh_fn is None:
                 continue  # a catalog source with no dispatcher wired yet
@@ -284,6 +322,21 @@ def run_once(catalog: DataCatalog, last_run: dict[str, float]) -> None:
                 except Exception:
                     logger.exception("refresh failed", extra={"source": source.name, "symbol": symbol})
             last_run[source.name] = now
+
+        # Discovery runs regardless of whether any symbol is monitored —
+        # its whole point is helping a user go from zero monitored
+        # symbols to their first few, so it cannot be gated behind
+        # already having some (CLAUDE.md's "Extension — Discovery").
+        # Restructuring run_once to support this also fixes the same
+        # latent gate on economic_indicators above, as a direct
+        # consequence of the same change, not a separate deliberate fix.
+        discovery_last_run_at = last_run.get(_DISCOVERY_JOB_NAME)
+        if discovery_last_run_at is None or (now - discovery_last_run_at) >= DISCOVERY_SCAN_INTERVAL_SECONDS:
+            try:
+                run_discovery_scan(catalog, conn)
+            except Exception:
+                logger.exception("discovery scan failed")
+            last_run[_DISCOVERY_JOB_NAME] = now
 
 
 def main() -> None:

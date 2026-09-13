@@ -1255,3 +1255,79 @@ Actor's repeated attempts to suggest it correctly kept failing — honest
 abstention, not a bug, matching this project's own established
 abstention discipline); and the retry-preservation fix confirmed via a
 controlled unit test reproducing the exact real scenario that exposed it.
+
+### D5 — done (2026-09-13): `refresh_worker` integration
+
+`run_discovery_scan(catalog, conn)`: fetches both RSS sources' full
+general feeds (`parse_rss_general`, not the existing per-symbol
+`refresh_rss_news` keyword-filtered path), upserts into
+`general_news_items`, reads the last `DISCOVERY_LOOKBACK_DAYS` (2, a
+worker-file constant matching `FRED_LOOKBACK_DAYS`'s own precedent — not
+operator-tunable, so not a `Settings` field) worth of rows via
+`get_recent_general_news`, runs the Boss loop, persists accepted
+suggestions via `insert_suggestions`. New module constants:
+`_DISCOVERY_JOB_NAME`, `_DISCOVERY_RSS_SOURCES`,
+`DISCOVERY_SCAN_INTERVAL_SECONDS = 86400` (daily), `DISCOVERY_LOOKBACK_DAYS
+= 2`.
+
+**A real structural decision forced by this integration**: `run_once`
+previously early-returned entirely when there were zero monitored
+symbols — correct for every *existing* per-symbol dispatcher, but wrong
+for discovery, whose entire purpose is helping an operator go from zero
+monitored symbols to their first few. Restructured `run_once` so only
+the per-symbol instrument-refresh loop and per-symbol dispatch are
+skipped when `symbols` is empty; `_ECONOMIC_SOURCES` handling (already
+economy-wide) and the new discovery job both run unconditionally,
+gated only by their own cadence check. This is a genuine behavior change
+to previously-shipped code, not scope creep — the alternative (special-
+casing discovery around the early return) would have left the same
+latent "cannot bootstrap from zero" gate for any future economy-wide job
+too.
+
+**A real test-hygiene bug found and fixed before any test ran against
+live infrastructure**: `run_once` now calls `run_discovery_scan`
+unconditionally, but the existing `_neutralize_all_dispatchers` autouse
+fixture (`tests/test_refresh_worker.py`) didn't cover it — every one of
+the 11 pre-existing tests calling `run_once` was silently making two
+real, unmocked RSS fetches per run (masked because the resulting
+failure, iterating a `MagicMock` cursor's fake rows, was swallowed by
+`run_once`'s own broad `except Exception` around the discovery call, so
+no test ever failed). Caught by reasoning about the new unconditional
+call before it ran, not by a test failure. Fixed by adding
+`run_discovery_scan` to the fixture's patch list. Three new dedicated
+tests then added for the behavior the fixture necessarily hides from
+every other test: `run_once` calls `run_discovery_scan` even with zero
+monitored symbols; `run_once` skips a too-recent discovery re-run; and a
+direct orchestration test for `run_discovery_scan` itself (mocking
+`fetch_rss_feed`/`parse_rss_general`/`upsert_general_news`/
+`get_recent_general_news`/`run_discovery`/`insert_suggestions`) — this
+last one had to explicitly restore the real function via a reference
+captured before the autouse fixture patches it, since the fixture's own
+patch would otherwise make it test the no-op stub instead of the real
+orchestration. 4 new tests; 218 passing total.
+
+**Live verification (2026-09-13)**, same temporary-dev-Postgres
+discipline as every prior phase (a fresh `trading-advisor-dev-pg`
+container on port 5433, confirmed via `docker ps`/`docker ps -a` before
+and after that the only containers touched were this one — the
+previously-documented dormant `fantasy-postgres-1` object under the
+native context stayed in its `Created`, never-started state throughout):
+migrations applied cleanly, then `run_discovery_scan` called directly
+with **zero monitored symbols** — ingested 200 real articles, ran a real
+Actor call and a real Haiku identity-judge call, completed without
+error (that run happened to accept zero suggestions — an honest
+abstention, not a failure, matching D3-D4's own documented case). Then
+`refresh_worker.run_once()` itself was exercised twice back-to-back
+against the real dev Postgres: the first call correctly dispatched
+discovery with zero monitored symbols (confirming the restructured
+early-return logic, not just the isolated function call above); the
+second, immediate call correctly did **not** re-run discovery (the
+24-hour cadence gate holding). That second real run produced a genuine
+malformed-symbol case live (`PMEX`, a 404 from Yahoo, correctly rejected
+by the Critic's resolution check — the same class of finding as
+D3-D4's `PEMEX` case, arising organically rather than staged) alongside
+one real accepted-and-persisted suggestion (Oracle, citing Larry
+Ellison's canceled share-sale plan) — confirming the full
+ingest→Actor→Critic→Boss→persist cycle end to end through the actual
+`refresh_worker` code path, not just via D3-D4's earlier direct
+function-level verification of the same underlying calls.
