@@ -48,6 +48,7 @@ def dashboard() -> rx.Component:
             rx.hstack(
                 rx.heading("Trading Advisor", size="7"),
                 rx.spacer(),
+                rx.link(rx.button("Feeds", variant="soft"), href="/feeds"),
                 rx.link(rx.button("Analyze a company"), href="/analyze"),
                 width="100%",
                 align="center",

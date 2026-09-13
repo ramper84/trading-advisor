@@ -24,6 +24,11 @@ from app.retrieval.vector_retriever import retrieve
 from app.services.db import get_connection
 from app.services.llm_service import generate_synthesis
 
+# Discovery ("Extension — Discovery", D6) reads only — no LLM/guardrail
+# imports here; the scan itself runs in refresh_worker (D5), never
+# triggered from the UI.
+from app.retrieval.sql_retriever import get_general_news_by_ids, get_latest_suggestions
+
 
 def _f(value) -> Optional[float]:
     """Decimal (from psycopg) isn't JSON-serializable as a Reflex var —
@@ -356,6 +361,18 @@ class AnalyzeState(rx.State):
     def set_query(self, value: str):
         self.query = value
 
+    def load_from_query(self):
+        """A suggestion on `/feeds` links here as `/analyze?symbol=...` —
+        a suggestion is a lead, never a grounded analysis, so it routes
+        into the real guardrailed pipeline rather than straight to
+        monitor (CLAUDE.md's "Extension — Discovery" design). Query
+        params, not a path segment, so `router.url.query_parameters`
+        (state.py's existing note on why path params can't cover this).
+        """
+        symbol = self.router.url.query_parameters.get("symbol", "")
+        if symbol:
+            self.symbol_input = symbol.upper()
+
     @rx.event(background=True)
     async def run_analysis(self):
         symbol = self.symbol_input.strip().upper()
@@ -444,3 +461,61 @@ class AnalyzeState(rx.State):
         await asyncio.to_thread(add_to_monitor, symbol)
         async with self:
             self.is_monitored = True
+
+
+def _suggestion_dict(row, articles_by_id: dict) -> dict:
+    # A pre-rendered markdown string, not a nested list[dict]: a second
+    # rx.foreach over entry["sources"] (entry itself already an iteration
+    # var from the outer foreach) raised a real ForeachVarError — Reflex
+    # loses type information on a subscript of a subscript, the same
+    # family of issue as AnalyzeState.result's own flattening fix, just
+    # one level deeper here. A single string field sidesteps it entirely;
+    # rx.markdown renders the links.
+    sources_markdown = "\n".join(
+        f"- [{articles_by_id[a].headline}]({articles_by_id[a].url})"
+        for a in row.source_article_ids
+        if a in articles_by_id
+    )
+    return {
+        "symbol": row.symbol,
+        "company_name": row.company_name,
+        "reasoning": row.reasoning,
+        "generated_at": row.generated_at.isoformat() if row.generated_at else "",
+        "sources_markdown": sources_markdown,
+    }
+
+
+class FeedsState(rx.State):
+    """`/feeds` (D6) — reads the latest scheduled-only discovery batch
+    (`refresh_worker`'s daily job, D5); this page never triggers a scan
+    itself, matching CLAUDE.md's "the UI only ever reads the latest
+    persisted batch" design."""
+
+    suggestions: list[dict] = []
+    is_loading: bool = False
+    error: str = ""
+
+    @rx.event(background=True)
+    async def load(self):
+        async with self:
+            self.is_loading = True
+            self.error = ""
+        try:
+            suggestions = await asyncio.to_thread(self._load_sync)
+        except Exception as exc:  # noqa: BLE001
+            async with self:
+                self.error = f"Failed to load suggestions: {exc}"
+                self.is_loading = False
+            return
+        async with self:
+            self.suggestions = suggestions
+            self.is_loading = False
+
+    @staticmethod
+    def _load_sync() -> list[dict]:
+        with get_connection() as conn:
+            rows = get_latest_suggestions(limit=20, conn=conn)
+            all_article_ids = {a for row in rows for a in row.source_article_ids}
+            articles = get_general_news_by_ids(list(all_article_ids), conn=conn)
+        articles_by_id = {a.id: a for a in articles}
+        return [_suggestion_dict(row, articles_by_id) for row in rows]

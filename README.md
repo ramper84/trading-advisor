@@ -261,19 +261,22 @@ on a locally-run TradingView Desktop app. Both are gone, not paused — see
       not built early as scope creep.
 - [ ] Phase 16 (reranking) and Phase 17 (evals) remain — both reserved,
       not gaps; build when asked for
-- [x] Discovery D1-D5 (`CLAUDE.md`'s "Extension — Discovery", 2026-09-13):
-      general news ingestion, the Actor (`gpt-4o-mini`/Haiku, an
-      experienced-trader persona), the Critic (citation integrity, symbol
-      resolution, and — added live, a real gap found in testing — a
-      second LLM call verifying a resolved ticker is the *right* company,
-      not just *a* real one), the Boss (retry with feedback, accepted
-      suggestions now survive a retry after a real bug showed they
-      didn't), persistence, and a daily `refresh_worker` job that runs
-      regardless of whether any symbol is monitored yet. 218 tests
-      passing. Live-verified with real news and real LLM calls: a correct
-      suggestion accepted, wrong-ticker attempts (including one that
-      surfaced organically through `refresh_worker` itself, not staged)
-      rejected, a run that correctly abstained entirely, and
-      `refresh_worker.run_once()` confirmed to dispatch discovery with
-      zero monitored symbols while correctly respecting its own 24-hour
-      cadence on a second, immediate call. D6 (`/feeds` page) remains.
+- [x] Discovery D1-D6 (`CLAUDE.md`'s "Extension — Discovery", 2026-09-13,
+      complete): general news ingestion, the Actor (`gpt-4o-mini`/Haiku,
+      an experienced-trader persona), the Critic (citation integrity,
+      symbol resolution, and — added live, a real gap found in testing —
+      a second LLM call verifying a resolved ticker is the *right*
+      company, not just *a* real one), the Boss (retry with feedback,
+      accepted suggestions now survive a retry after a real bug showed
+      they didn't), persistence, a daily `refresh_worker` job that runs
+      regardless of whether any symbol is monitored yet, and a Reflex
+      `/feeds` page (a suggestion links to `/analyze?symbol=X`, never
+      straight to monitor). 220 tests passing. Live-verified end to end,
+      including a real headless-browser pass over `/feeds`: a correct
+      suggestion accepted and rendered with real clickable source links,
+      wrong-ticker attempts (one surfaced organically through
+      `refresh_worker` itself, not staged) rejected, a run that correctly
+      abstained entirely, `refresh_worker.run_once()` confirmed to
+      dispatch discovery with zero monitored symbols while respecting its
+      own 24-hour cadence, and the `/feeds` → `/analyze?symbol=` →
+      pre-filled symbol field flow confirmed via a real DOM click.

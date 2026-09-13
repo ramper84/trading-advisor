@@ -1216,3 +1216,54 @@ loader → parser → normalizer → (chunk → embed, for Axis-3 sources) → s
   the full ingest→Actor→Critic→Boss→persist cycle through the actual
   `refresh_worker` code path, not just D3-D4's earlier direct-function
   verification of the same underlying calls.
+
+### ADR-017 — Discovery D6: the `/feeds` page; a doubly-nested Reflex Var can't be `.foreach`'d even after flattening once (2026-09-13)
+
+- **Status**: Accepted.
+- **Context**: Phase 18 already established a fix pattern for Reflex's
+  type-system limits on subscripted Vars — flatten a nested `dict` into
+  individual typed top-level fields. D6's `/feeds` page hit a variant one
+  level deeper: each item in the page's outer `list[dict]` (one dict per
+  suggestion) itself needed to carry a *list* of source articles, and
+  that inner list is what actually needs iterating in the template.
+- **Decision**: rather than flattening to a fixed number of numbered
+  source fields (`source_1_headline`, `source_2_headline`, ...) — workable
+  but brittle against a variable citation count — each suggestion's
+  sources are pre-rendered server-side, in `FeedsState._load_sync`, into
+  one markdown string (`"- [headline](url)\n- ..."`) and rendered with a
+  single `rx.markdown()` call. A plain string field has none of the
+  subscript-losing-type-information problem a nested structure does, and
+  markdown gives back real clickable links without a second `rx.foreach`.
+- **Two real bugs this uncovered, both only visible by actually
+  compiling the app** (`reflex run`'s own compile step, not `pytest`,
+  catches these — no backend unit test exercises page-template code):
+  1. `entry["sources"].length() > 0` (`entry` already an outer-foreach
+     iteration variable) raised `UntypedVarError` — the same class Phase
+     18 found on `AnalyzeState.result`, fixed the same way (a
+     precomputed top-level bool instead of a method call on a subscript).
+  2. That fix alone was insufficient: `rx.foreach(entry["sources"], ...)`
+     — a *second* foreach over a subscript of an already-subscripted
+     iteration variable — raised a distinct `ForeachVarError` ("Could not
+     foreach over var ... of type Any"), which Phase 18's single-level
+     flattening never needed to handle. This is why the markdown-string
+     approach above was chosen over a second round of field-flattening:
+     it removes the nested-foreach shape entirely rather than working
+     around the type checker's limits on it again.
+- **A new `sql_retriever.py` read not in the original D-numbered
+  design**: `get_general_news_by_ids()`, resolving a suggestion's stored
+  `source_article_ids` back to real headline/url pairs — the original
+  design's "source links" bullet needed *some* read path back from ids to
+  articles, and none existed yet since D1-D5 never needed to go in that
+  direction (only ever news → suggestion, never suggestion → news).
+- **Verification (2026-09-13)**: 2 new tests (`get_general_news_by_ids`,
+  including the empty-list short-circuit); 220 passing total. Live, same
+  temporary-dev-Postgres discipline as every prior phase (confirmed via
+  `docker ps -a` that only the one temporary container was touched):
+  driven with a real headless browser against a real `reflex run` dev
+  server — a real seeded suggestion rendered correctly including two real
+  clickable source links (no raw markdown syntax leaking through), the
+  "Analyze" link's `?symbol=` query-param pre-fill confirmed via an actual
+  DOM click into `/analyze?symbol=AAPL`, and the dashboard's new "Feeds"
+  nav link confirmed to navigate correctly. Zero console/network errors
+  across all pages and navigations.
+- **Consequence**: closes Discovery's full D1-D6 build order.

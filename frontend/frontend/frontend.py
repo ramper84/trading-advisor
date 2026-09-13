@@ -32,8 +32,9 @@ from starlette.routing import Route
 
 from frontend.pages.analyze import analyze
 from frontend.pages.dashboard import dashboard
+from frontend.pages.feeds import feeds
 from frontend.pages.symbol_detail import symbol_detail
-from frontend.state import DashboardState, SymbolState
+from frontend.state import AnalyzeState, DashboardState, FeedsState, SymbolState
 
 
 def _spa_fallback_path() -> Path:
@@ -62,4 +63,9 @@ app = rx.App(api_transformer=_spa_fallback_router)
 # when visited" actually needs.
 app.add_page(dashboard, route="/", title="Trading Advisor", on_load=DashboardState.load)
 app.add_page(symbol_detail, route="/symbols/[symbol]", title="Symbol", on_load=SymbolState.load)
-app.add_page(analyze, route="/analyze", title="Analyze")
+# on_load also picks up `?symbol=` from a /feeds suggestion link, not just
+# a plain visit — same on_load-over-on_mount reasoning as above, since a
+# suggestion link re-navigates to an already-mounted /analyze route within
+# the same SPA session just as often as a fresh visit.
+app.add_page(analyze, route="/analyze", title="Analyze", on_load=AnalyzeState.load_from_query)
+app.add_page(feeds, route="/feeds", title="Feeds", on_load=FeedsState.load)

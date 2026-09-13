@@ -3,6 +3,7 @@ from unittest.mock import MagicMock
 
 from app.retrieval.sql_retriever import (
     country_for_symbol,
+    get_general_news_by_ids,
     get_instrument,
     get_latest_fundamentals,
     get_latest_suggestions,
@@ -99,6 +100,26 @@ def test_get_recent_general_news_maps_rows_and_windows_by_lookback():
 def test_get_recent_general_news_empty():
     conn, _ = _conn_returning([])
     assert get_recent_general_news(lookback_days=3, conn=conn) == []
+
+
+def test_get_general_news_by_ids_maps_rows():
+    row = (10, "elfinanciero_news", 4, "Headline", "Summary", "https://x.mx/a", datetime(2026, 9, 12, tzinfo=timezone.utc))
+    conn, cursor = _conn_returning([row])
+    results = get_general_news_by_ids([10], conn=conn)
+    assert len(results) == 1
+    assert results[0].id == 10
+    sql, params = cursor.execute.call_args[0]
+    assert "general_news_items" in sql
+    assert params == ([10],)
+
+
+def test_get_general_news_by_ids_empty_list_skips_query():
+    """No suggestion has zero source_article_ids in practice, but an empty
+    list must not become `WHERE id = ANY('{}')` (a real, valid-but-wasteful
+    round trip) — short-circuit before any query is issued."""
+    conn = MagicMock()
+    assert get_general_news_by_ids([], conn=conn) == []
+    conn.cursor.assert_not_called()
 
 
 def test_get_latest_suggestions_maps_rows():

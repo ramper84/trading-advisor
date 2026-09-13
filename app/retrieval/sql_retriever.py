@@ -273,6 +273,21 @@ def get_recent_general_news(
     return [GeneralNewsItemRow(*r) for r in rows]
 
 
+def get_general_news_by_ids(ids: list[int], conn: Optional[psycopg.Connection] = None) -> list[GeneralNewsItemRow]:
+    """Resolves a suggestion's `source_article_ids` back to real articles
+    (headline + url) for display — the UI shows a suggestion's actual
+    source links, not just the bare ids persisted in `suggestions`."""
+    if not ids:
+        return []
+    rows = _query(
+        conn,
+        "SELECT id, source_name, reliability_tier, headline, summary, url, published_at "
+        "FROM general_news_items WHERE id = ANY(%s)",
+        (list(ids),),
+    )
+    return [GeneralNewsItemRow(*r) for r in rows]
+
+
 def get_latest_suggestions(limit: int = 20, conn: Optional[psycopg.Connection] = None) -> list[SuggestionRow]:
     """The most recent suggestions, newest first — `suggestions` is
     append-only with no scan-run grouping, so "latest N" is the whole

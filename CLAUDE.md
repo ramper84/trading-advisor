@@ -1331,3 +1331,56 @@ Ellison's canceled share-sale plan) — confirming the full
 ingest→Actor→Critic→Boss→persist cycle end to end through the actual
 `refresh_worker` code path, not just via D3-D4's earlier direct
 function-level verification of the same underlying calls.
+
+### D6 — done (2026-09-13): the `/feeds` page
+
+`frontend/frontend/state.py`: `FeedsState` (plumbing only, matching every
+other page's state — no LLM/guardrail import; the scan itself only ever
+runs in `refresh_worker`, D5, never triggered from the UI).
+`get_general_news_by_ids()` (a new `sql_retriever.py` read, not in the
+original D-numbered design) resolves a suggestion's stored
+`source_article_ids` back to real headline/url pairs for display.
+`AnalyzeState.load_from_query` reads a `?symbol=` query parameter
+(`router.url.query_parameters`, not `router.page.params` — the latter is
+path segments only) and pre-fills the symbol field; registered as
+`/analyze`'s own `on_load`. A suggestion links to `/analyze?symbol=X`
+rather than adding to monitor directly — the design's own stated rule
+("a suggestion routes into `/analyze` ... never bypass it"), now wired
+for real.
+
+**Two real Reflex type-system bugs found only by actually compiling the
+page — the same family as Phase 18's own findings, one level deeper
+this time**: the natural first draft nested each suggestion's sources as
+`list[dict]` inside the outer `list[dict]` state var. (1) Calling
+`.length()` on `entry["sources"]` (an iteration variable's own subscript)
+raised `UntypedVarError`, fixed by moving the length check to a
+pre-computed top-level `has_sources: bool` field on each suggestion dict.
+(2) That fix alone wasn't enough: a *second* `rx.foreach` over
+`entry["sources"]` — a subscript of an already-subscripted iteration
+var — raised a distinct `ForeachVarError` ("Could not foreach over var
+... of type Any"), a doubly-nested case Phase 18's original flattening
+fix never had to handle. Fixed by not nesting at all: each suggestion's
+sources are pre-rendered server-side into one markdown string
+(`sources_markdown`, e.g. `"- [headline](url)\n- ..."`) and rendered with
+a single `rx.markdown()` call — no inner `foreach`, no subscript-of-a-
+subscript, and real clickable links survive the round trip through
+markdown parsing.
+
+**Live verification (2026-09-13)**, same temporary-dev-Postgres
+discipline as every prior phase (`trading-advisor-dev-pg` on port 5433,
+confirmed via `docker ps -a` before and after that only this container
+was touched — `fantasy-postgres-1` stayed in its dormant `Created`
+state): driven with a real headless browser (Playwright) against a real
+`reflex run` dev server, not just `curl`. Confirmed: `/feeds` renders a
+real seeded suggestion (symbol, company name, reasoning, and two real
+clickable source links with real El Financiero headlines — no raw
+markdown syntax leaking through, confirming `rx.markdown` actually
+parsed it); clicking "Analyze" on the card navigates to
+`/analyze?symbol=AAPL` and the Analyze page's symbol field arrives
+pre-filled with "AAPL" (the query-param wiring confirmed via a real DOM
+click, not a direct `goto`); the dashboard's new "Feeds" nav link
+navigates to `/feeds`. Zero browser console/network errors across all
+three pages and both click-driven navigations. 220 tests passing (2 new,
+covering `get_general_news_by_ids`).
+
+This closes out the Discovery extension's full D1-D6 build order.
